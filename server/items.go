@@ -1,12 +1,13 @@
-package eridanus
+package server
 
 import (
-  "bufio"
-  "bytes"
-  "strings"
+	"bufio"
+	"bytes"
+	"io/ioutil"
+	"strings"
 	"sync"
 
-  log "github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"go.chromium.org/luci/common/data/stringset"
 )
 
@@ -49,14 +50,14 @@ func (c *Cache) AddTags(itemHash string, tags ...string) error {
 	}
 
 	if _, ok := c.stash[itemHash]; !ok {
-    c.stash[itemHash] = stringset.New(1)
-    c.stash[itemHash].Add("system:new")
+		c.stash[itemHash] = stringset.New(1)
+		c.stash[itemHash].Add("system:new")
 	}
 
-  log.Infof("Adding to %s: %s", itemHash, tags)
-  c.stash[itemHash].AddAll(tags)
-  
-  return nil
+	log.Infof("Adding to %s: %s", itemHash, tags)
+	c.stash[itemHash].AddAll(tags)
+
+	return nil
 }
 
 func (c *Cache) DelTags(itemHash string, tags ...string) error {
@@ -69,13 +70,13 @@ func (c *Cache) DelTags(itemHash string, tags ...string) error {
 
 	if _, ok := c.stash[itemHash]; !ok {
 		c.stash[itemHash] = stringset.New(1)
-    c.stash[itemHash].Add("system:new")
+		c.stash[itemHash].Add("system:new")
 	}
 
-  log.Infof("Removing from %s: %s", itemHash, tags)
+	log.Infof("Removing from %s: %s", itemHash, tags)
 	c.stash[itemHash].DelAll(tags)
-  
-  return nil
+
+	return nil
 }
 
 func (c *Cache) Range(op func(string, []string) error) error {
@@ -92,36 +93,62 @@ func (c *Cache) Range(op func(string, []string) error) error {
 }
 
 var (
-  fieldDelim = ","
-  recordDelim = "\n"
+	fieldDelim  = ","
+	recordDelim = "\n"
 )
 
 func (c *Cache) MarshalText() ([]byte, error) {
-  buf := bytes.NewBuffer(nil)
-  for h, ts := range c.stash {
-    buf.WriteString(h)
-    for t := range ts {
-      buf.WriteString(fieldDelim)
-      buf.WriteString(t)
-    }
-    buf.WriteString(recordDelim)
-  }
-  return buf.Bytes(), nil
+	buf := bytes.NewBuffer(nil)
+	for h, ts := range c.stash {
+		buf.WriteString(h)
+		for t := range ts {
+			buf.WriteString(fieldDelim)
+			buf.WriteString(t)
+		}
+		buf.WriteString(recordDelim)
+	}
+	return buf.Bytes(), nil
 }
 
 func (c *Cache) UnmarshalText(text []byte) error {
-  newStash := make(map[string]stringset.Set)
+	newStash := make(map[string]stringset.Set)
 
 	scanner := bufio.NewScanner(bytes.NewBuffer(text))
 	for scanner.Scan() {
-    parts := strings.Split(scanner.Text(), fieldDelim)
-    newStash[parts[0]] = stringset.NewFromSlice(parts[1:]...)
+		parts := strings.Split(scanner.Text(), fieldDelim)
+		newStash[parts[0]] = stringset.NewFromSlice(parts[1:]...)
 	}
 	if err := scanner.Err(); err != nil {
 		log.Errorf("reading standard input: %v", err)
 	}
 
-  log.Infof("loaded %d entries", len(newStash))
-  c.stash = newStash
-  return nil
+	log.Infof("loaded %d entries", len(newStash))
+	c.stash = newStash
+	return nil
+}
+
+func (c *Cache) Load(path string) error {
+	if path == "" {
+		return nil
+	}
+	t, err := ioutil.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return c.UnmarshalText(t)
+}
+
+func (c *Cache) Save(path string) error {
+	if path == "" {
+		return nil
+	}
+	t, err := c.MarshalText()
+	if err != nil {
+		return err
+	}
+	log.Infof("serialized: %s", t)
+	if err := ioutil.WriteFile(path, t, 0644); err != nil {
+		return err
+	}
+	return nil
 }
