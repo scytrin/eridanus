@@ -1,18 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
-	"io"
-	"mime/multipart"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"path"
 	"syscall"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 	"stadik.net/eridanus/server"
@@ -29,67 +25,52 @@ func init() {
 	// flag.StringVar(&crtFile, "crt_file", "", "The TLS crt file")
 	// flag.StringVar(&keyFile, "key_file", "", "The TLS key file")
 	flag.StringVar(&storageDir, "storage_dir",
-		`C:\Users\scytr\Documents\EridanusStore`,
+		`Z:\Hydrus Network\db\client_files\`,
 		"Directory at which stored media can be found.")
 	flag.StringVar(&importsDir, "imports_dir",
-		"",
+		``,
+		// `Z:\Hydrus Network\db\client_files\f*`,
+		// `Z:\Hydrus Network\db\client_files\f0b\0b086ce28284e7f94119b569fc40ea1ee5777e2f38ffeb26fa6b12e4a7936b75.jpg`,
 		"Directory at which stored media can be found.")
 	flag.StringVar(&persistFile, "persist",
 		`C:\Users\scytr\Documents\EridanusCache`,
 		"")
+	flag.Parse()
+
+	log.SetFormatter(new(EFormatter))
+	log.SetReportCaller(true)
 }
 
 func main() {
-	flag.Parse()
-
-	log.SetReportCaller(true)
-	log.SetFormatter(&log.TextFormatter{
-		DisableColors: true,
-		FullTimestamp: true,
-	})
-
-	eridanusServer, err := server.NewServer(server.Config{
-		StoragePath: storageDir,
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if err := eridanusServer.Load(persistFile); err != nil {
-		log.Error(err)
-	}
-
-	httpServeAddr = fmt.Sprintf("localhost:%d", port)
-	httpServer := &http.Server{
-		Addr:    httpServeAddr,
-		Handler: eridanusServer.NewServeMux(),
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	log.Info("initializing eridanus server")
+	eridanusServer := &server.Server{}
+	if err := eridanusServer.Load(persistFile); err != nil {
+		log.Error(err)
+	}
+	eridanusServer.StoragePath = storageDir
+
+	log.Info("initializing http server")
+	httpServeAddr = fmt.Sprintf("localhost:%d", port)
+	httpServer := &http.Server{
+		Addr:    httpServeAddr,
+		Handler: eridanusServer,
+	}
+
 	go onSignal(ctx, func() {
 		defer cancel()
-		log.Info(httpServer.Close())
+		if err := httpServer.Close(); err != nil {
+			log.Error(err)
+		}
 	}, syscall.SIGINT, syscall.SIGTERM)
 
-	go onSignal(ctx, func() {
-		if err := eridanusServer.BuildPhashStore(); err != nil {
-			log.Fatal(err)
-		}
-	}, syscall.SIGHUP)
-
 	go func() {
-		time.Sleep(5 * time.Second)
 		if importsDir != "" {
-			if err := filepath.Walk(importsDir, uploadWalkFunc); err != nil {
+			if err := eridanusServer.ImportDir(ctx, importsDir, 10, false); err != nil {
 				log.Error(err)
 			}
-		}
-		if samesies, err := eridanusServer.FindSimilar(); err != nil {
-			log.Error(err)
-		} else {
-			log.Print(samesies)
 		}
 	}()
 
@@ -97,13 +78,26 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
-	log.Print("shutting down")
 
+	log.Print("shutting down")
 	if err := eridanusServer.Save(persistFile); err != nil {
 		log.Error(err)
 	}
 
 	log.Print("exited gracefully")
+}
+
+type EFormatter struct{ log.TextFormatter }
+
+func (f *EFormatter) Format(entry *log.Entry) ([]byte, error) {
+	return []byte(fmt.Sprintf(
+		"%s %s %s:%d -- %s\n",
+		entry.Time.Format(f.TimestampFormat),
+		entry.Level.String(),
+		path.Base(entry.Caller.File),
+		entry.Caller.Line,
+		entry.Message,
+	)), nil
 }
 
 func onSignal(ctx context.Context, do func(), signals ...os.Signal) error {
@@ -123,58 +117,4 @@ func onSignal(ctx context.Context, do func(), signals ...os.Signal) error {
 			}
 		}
 	}
-}
-
-func uploadFileBody(path string) (io.Reader, string, error) {
-	body := bytes.NewBuffer(nil)
-	writer := multipart.NewWriter(body)
-	defer writer.Close()
-
-	part, err := writer.CreateFormFile("file", filepath.Base(path))
-	if err != nil {
-		return nil, "", err
-	}
-
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, "", err
-	}
-	defer file.Close()
-
-	if _, err := io.Copy(part, file); err != nil {
-		return nil, "", err
-	}
-
-	return body, writer.FormDataContentType(), nil
-}
-
-func uploadFileRequest(url, path string) (*http.Request, error) {
-	body, contentType, err := uploadFileBody(path)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", url, body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-	return req, nil
-}
-
-func uploadWalkFunc(path string, info os.FileInfo, walkErr error) error {
-	if walkErr != nil {
-		log.Warn(walkErr)
-		return nil
-	}
-	if info.IsDir() {
-		return nil
-	}
-	req, err := uploadFileRequest("http://"+httpServeAddr+"/upload", path)
-	if err != nil {
-		return err
-	}
-	_, err = (&http.Client{}).Do(req)
-	return err
 }
