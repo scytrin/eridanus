@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"runtime"
 	"syscall"
 
 	log "github.com/sirupsen/logrus"
@@ -15,18 +16,13 @@ import (
 )
 
 var (
-	crtFile, keyFile, storageDir, importsDir, persistFile string
-	httpServeAddr                                         string
-	port                                                  int
+	importsDir, persistFile string
 )
 
 func init() {
-	flag.IntVar(&port, "port", 8080, "")
-	// flag.StringVar(&crtFile, "crt_file", "", "The TLS crt file")
-	// flag.StringVar(&keyFile, "key_file", "", "The TLS key file")
-	flag.StringVar(&storageDir, "storage_dir",
-		`Z:\Hydrus Network\db\client_files\`,
-		"Directory at which stored media can be found.")
+	log.SetFormatter(new(EFormatter))
+	log.SetReportCaller(true)
+
 	flag.StringVar(&importsDir, "imports_dir",
 		``,
 		// `Z:\Hydrus Network\db\client_files\f*`,
@@ -36,50 +32,45 @@ func init() {
 		`C:\Users\scytr\Documents\EridanusCache`,
 		"")
 	flag.Parse()
+}
 
-	log.SetFormatter(new(EFormatter))
-	log.SetReportCaller(true)
+func init() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
 }
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	log.Info("initializing eridanus server")
 	eridanusServer := &server.Server{}
 	if err := eridanusServer.Load(persistFile); err != nil {
 		log.Error(err)
 	}
-	eridanusServer.StoragePath = storageDir
 
-	log.Info("initializing http server")
-	httpServeAddr = fmt.Sprintf("localhost:%d", port)
-	httpServer := &http.Server{
-		Addr:    httpServeAddr,
+	httpServer := &http.Server{}
+	httpServer = &http.Server{
+		Addr:    fmt.Sprintf("localhost:%d", eridanusServer.Port),
 		Handler: eridanusServer,
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	go onSignal(ctx, func() {
-		defer cancel()
-		if err := httpServer.Close(); err != nil {
+		if err := httpServer.Shutdown(ctx); err != nil {
 			log.Error(err)
 		}
 	}, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		if importsDir != "" {
-			if err := eridanusServer.ImportDir(ctx, importsDir, 10, false); err != nil {
+			if err := eridanusServer.ImportDir(ctx, importsDir, 10); err != nil {
 				log.Error(err)
 			}
 		}
 	}()
 
-	log.Info("serving...")
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 
-	log.Print("shutting down")
 	if err := eridanusServer.Save(persistFile); err != nil {
 		log.Error(err)
 	}
@@ -105,16 +96,14 @@ func onSignal(ctx context.Context, do func(), signals ...os.Signal) error {
 	defer close(sigChan)
 	signal.Notify(sigChan, signals...)
 	defer signal.Stop(sigChan)
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case sig, more := <-sigChan:
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		defer cancel()
+		for sig := range sigChan {
 			log.Infof("got signal %v", sig)
 			do()
-			if !more {
-				return nil
-			}
 		}
-	}
+	}()
+	<-ctx.Done()
+	return ctx.Err()
 }

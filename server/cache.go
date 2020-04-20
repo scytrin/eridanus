@@ -37,7 +37,7 @@ func (m Cache) AddTags(idHash string, tags ...string) error {
 	}
 
 	if _, ok := m[idHash]; !ok {
-		m[idHash].Add("system:new")
+		m[idHash] = stringset.NewFromSlice("system:new")
 	}
 
 	// log.Infof("Adding to %s:\n%s", idHash, strings.Join(tags, "\n"))
@@ -55,7 +55,7 @@ func (m Cache) DelTags(idHash string, tags ...string) error {
 	}
 
 	if _, ok := m[idHash]; !ok {
-		m[idHash].Add("system:new")
+		m[idHash] = stringset.NewFromSlice("system:new")
 	}
 
 	// log.Infof("Removing from %s:\n%s", idHash, strings.Join(tags, "\n"))

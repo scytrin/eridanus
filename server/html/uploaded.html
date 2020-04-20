@@ -1,0 +1,12 @@
+{{template "head.html"}}
+
+<h1>Uploaded files</h1>
+<div class="thumbnails">
+{{range .Uploaded}}
+  {{template "thumbnail.html" .}}
+{{else}}
+  <div>No successful uploads.</div>
+{{end}}
+</div>
+
+{{template "foot.html"}}

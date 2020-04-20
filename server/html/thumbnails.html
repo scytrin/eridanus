@@ -1,0 +1,7 @@
+<div class="thumbnails">
+  {{range .}}
+    {{template "thumbnail.html" .}}
+  {{else}}
+  <div>No items to display.</div>
+  {{end}}
+</div>

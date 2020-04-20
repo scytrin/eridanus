@@ -1,0 +1,16 @@
+{{template "head.html"}}
+
+<h1>Similar files</h1>
+{{with .Count}}<h2>{{.}} cases</h2>{{end}}
+
+{{range .Similar}}
+<div class="thumbnails">
+  {{range .}}
+    {{template "thumbnail.html" .}}
+  {{end}}
+</div>
+{{else}}
+<div>No similar items found.</div>
+{{end}}
+
+{{template "foot.html"}}

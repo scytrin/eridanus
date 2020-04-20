@@ -2,17 +2,18 @@ package server
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"html/template"
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
-	"io"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/dustin/go-humanize"
 	"github.com/gin-gonic/gin"
@@ -28,30 +29,52 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
+var cfgRouter sync.Once
+
 func init() {
 	gin.DisableConsoleColor()
 }
 
+func staticHTML(tmpl string) gin.HandlerFunc {
+	return func(c *gin.Context) { c.HTML(200, tmpl, nil) }
+}
+
+func (s *Server) storagePathCheck(c *gin.Context) {
+	if s.SaveUploads && s.Storage.Path == "" {
+		c.AbortWithError(http.StatusPreconditionFailed,
+			errors.New("no configured storage path"))
+		return
+	}
+	c.Next()
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.router == nil {
+	s.cfgRouter.Do(func() {
 		router := gin.Default()
-		router.StaticFile("/", "./static/index.html")
+		router.SetFuncMap(template.FuncMap{
+			"thumbnail": s.thumbnail,
+		})
+		router.LoadHTMLGlob("./server/html/*.html")
+
 		router.StaticFile("/favicon.ico", "./static/favicon.ico")
-		router.StaticFS("/static/", gin.Dir("./static/", true))
-
-		router.GET("/fetch", gin.WrapF(s.fetchGetHandler))
-		router.POST("/fetch", gin.WrapF(s.fetchPostHandler))
-
-		router.GET("/upload", gin.WrapF(s.uploadGetHandler))
-		router.POST("/upload", gin.WrapF(s.uploadPostHandler))
+		router.StaticFS("/static/", gin.Dir("./static/", false))
+		router.GET("/", staticHTML("index.html"))
 
 		router.GET("/similar", s.similarHandler)
 
-		router.GET("/image/:idHash", s.imagesHandler)
-		router.GET("/image/:idHash/similar", s.similarHandler)
-		router.GET("/image/:idHash/tags", s.tagsHandler)
+		imgRouter := router.Group("")
+		imgRouter.GET("/image/:idHash", s.imagesHandler)
+		imgRouter.GET("/image/:idHash/similar", s.similarHandler)
+		imgRouter.GET("/image/:idHash/tags", s.tagsHandler)
+
+		spRouter := router.Group("", s.storagePathCheck)
+		spRouter.GET("/fetch", staticHTML("fetch.html"))
+		spRouter.POST("/fetch", s.fetchPostHandler)
+		spRouter.GET("/upload", staticHTML("upload.html"))
+		spRouter.POST("/upload", s.uploadPostHandler)
+
 		s.router = router
-	}
+	})
 	s.router.ServeHTTP(w, r)
 	//* Leaving in place as this looks to be a really clean way to support GRPC
 	// if s.cfg.GRPCServer != nil {
@@ -61,60 +84,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// }
 }
 
-func (s *Server) tagsHandler(c *gin.Context) {
-	idHash := c.Param("idHash")
-	tags, ok := s.Cache[idHash]
-	if !ok {
-		c.AbortWithStatus(404)
-		// http.NotFound(c.Writer, c.Request)
-		return
-	}
-	c.IndentedJSON(200, tags)
-}
-
-func (s *Server) fetchGetHandler(w http.ResponseWriter, r *http.Request) {
-	if s.StoragePath == "" {
-		http.Error(w, "no configured storage path", http.StatusPreconditionFailed)
-		return
-	}
-
-	fmt.Fprint(w, `<!doctype html>
-<html>
-  <head>
-    <title>Eridanus</title>
-    <link rel="stylesheet" href="/static/style.css" />
-    <script src="/static/eridanus.js"></script>
-  </head>
-  <body>
-    <form method="get" enctype="multipart/form-data">
-      <input type="text" name="fetch" />
-      <input type="submit" />
-    </form>
-  </body>
-</html>`)
-}
-
-func (s *Server) fetchPostHandler(w http.ResponseWriter, r *http.Request) {
-	if s.StoragePath == "" {
-		http.Error(w, "no configured storage path", http.StatusPreconditionFailed)
-		return
-	}
-
-	fetchURL, err := url.Parse(strings.TrimSpace(r.FormValue("fetch")))
-	if err != nil {
-		log.Error(err)
-		http.Error(w, "invalid url", http.StatusBadRequest)
-		return
-	}
-
-	if err := s.Fetcher.Fetch(r.Context(), fetchURL); err != nil {
-		log.Error(err)
-		http.Error(w, "failed fetch", http.StatusBadRequest)
-		return
-	}
-}
-
-func (s *Server) thumbnail(w io.Writer, idHash string, info ...string) error {
+func (s *Server) thumbnail(idHash string, info ...string) (gin.H, error) {
 	altText := bytes.NewBuffer(nil)
 	for _, i := range info {
 		fmt.Fprintln(altText, i)
@@ -140,11 +110,39 @@ func (s *Server) thumbnail(w io.Writer, idHash string, info ...string) error {
 			}
 		}
 	}
-	fmt.Fprintf(w,
-		`<div class="thumbnail"><a href="%[2]s"><img src="%[2]s" alt="%[1]s" title="%[3]s" /></a></div>`,
-		idHash, fmt.Sprintf("/image/%s", idHash), altText.String())
 
-	return nil
+	return gin.H{
+		"Path":  fmt.Sprintf("/image/%s", idHash),
+		"Alt":   idHash,
+		"Title": altText.String(),
+	}, nil
+}
+
+func (s *Server) tagsHandler(c *gin.Context) {
+	idHash := c.Param("idHash")
+	tags, ok := s.Cache[idHash]
+	if !ok {
+		c.AbortWithStatus(404)
+		return
+	}
+	c.IndentedJSON(200, tags)
+}
+
+func (s *Server) fetchPostHandler(c *gin.Context) {
+	fetchURL, err := url.Parse(strings.TrimSpace(c.Request.FormValue("fetch")))
+	if err != nil {
+		log.Error(err)
+		c.AbortWithError(http.StatusBadRequest,
+			errors.New("invalid url"))
+		return
+	}
+
+	if err := s.Fetcher.Fetch(c.Request.Context(), fetchURL); err != nil {
+		log.Error(err)
+		c.AbortWithError(http.StatusInternalServerError,
+			errors.New("failed fetch"))
+		return
+	}
 }
 
 func (s *Server) similarHandler(c *gin.Context) {
@@ -169,47 +167,25 @@ func (s *Server) similarHandler(c *gin.Context) {
 		keys = s.Similar.ByQuantity()
 	}
 
-	var shown int
 	seen := make(stringset.Set)
-	body := bytes.NewBuffer(nil)
+	var similar [][]string
 	for _, idHash := range keys {
+		if len(similar) > 4 {
+			break
+		}
 		if seen.Has(idHash) {
 			continue
 		}
 
 		showHashes := append([]string{idHash}, s.Similar.ByDistance(idHash)...)
+		similar = append(similar, showHashes)
 		seen.AddAll(showHashes)
-		fmt.Fprint(body, `<div class="thumbnails">`)
-		for _, sh := range showHashes {
-			if err := s.thumbnail(body, sh,
-				fmt.Sprintf("...%s", sh[len(sh)-6:]),
-				fmt.Sprintf("dist: %s", humanize.Ftoa(s.Similar.Distance(idHash, sh))),
-			); err != nil {
-				log.Error(err)
-			}
-		}
-		fmt.Fprint(body, `</div>`)
-
-		shown++
-		if 5 < shown {
-			break
-		}
 	}
 
-	// look to using c.HTML after router.LoadHTMLFiles
-	c.Data(200, "text/html", []byte(fmt.Sprintf(`<!doctype html>
-<html>
-  <head>
-    <title>Eridanus</title>
-    <link rel="stylesheet" href="/static/style.css" />
-    <script src="/static/eridanus.js"></script>
-  </head>
-  <body>
-    <h1>Similar files</h1>
-    <h2>%d cases</h2>
-    %s
-  </body>
-</html>`, s.Similar.Len(), body)))
+	c.HTML(http.StatusOK, "similar.html", gin.H{
+		"Count":   s.Similar.Len(),
+		"Similar": similar,
+	})
 }
 
 func (s *Server) imagesHandler(c *gin.Context) {
@@ -218,7 +194,7 @@ func (s *Server) imagesHandler(c *gin.Context) {
 		c.AbortWithStatus(404)
 		return
 	}
-	filePath, err := s.findImage(idHash)
+	filePath, err := s.FindImage(idHash)
 	if err != nil {
 		c.AbortWithError(500, err)
 		return
@@ -231,76 +207,38 @@ func (s *Server) imagesHandler(c *gin.Context) {
 }
 
 // https://zupzup.org/go-http-file-upload-download/
-func (s *Server) uploadGetHandler(w http.ResponseWriter, r *http.Request) {
-	if s.StoragePath == "" {
-		http.Error(w, "no configured storage path", http.StatusPreconditionFailed)
-		return
-	}
-
-	fmt.Fprint(w, `<!doctype html>
-<html>
-  <head>
-    <title>Eridanus</title>
-    <link rel="stylesheet" href="/static/style.css" />
-    <script src="/static/eridanus.js"></script>
-  </head>
-  <body>
-    <form method="post" enctype="multipart/form-data">
-      <input type="file" name="files" multiple="multiple" />
-      <input type="submit" />
-    </form>
-  </body>
-</html>`)
-}
-
-// https://zupzup.org/go-http-file-upload-download/
-func (s *Server) uploadPostHandler(w http.ResponseWriter, r *http.Request) {
-	if s.StoragePath == "" {
-		http.Error(w, "no configured storage path", http.StatusPreconditionFailed)
-		return
-	}
-
-	mr, err := r.MultipartReader()
+func (s *Server) uploadPostHandler(c *gin.Context) {
+	form, err := c.MultipartForm()
 	if err != nil {
-		log.Errorf("file upload err (reader): %v", err)
+		c.AbortWithError(500, err)
 		return
 	}
 
-	body := bytes.NewBuffer(nil)
-	for {
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
+	var uploaded []string
+	for name, headers := range form.File {
+		log.Info(name)
+		for _, header := range headers {
+			log.Info(header.Filename)
+			fd, err := header.Open()
+			if err != nil {
+				log.Error(err)
+				continue
+			}
+			idHash, tags, err := s.Storage.Ingest(fd, false)
+			if err != nil {
+				log.Error(err)
+				continue
+			}
+			tags = append(tags,
+				fmt.Sprintf("filename:%s", header.Filename))
+			if err := s.AddTags(idHash, tags...); err != nil {
+				log.Errorf("ingest: %v", err)
+			}
+			uploaded = append(uploaded, idHash)
 		}
-		if err != nil {
-			log.Error(err)
-			break
-		}
-		defer part.Close()
-
-		if part.FormName() != "files" {
-			continue
-		}
-
-		idHash, err := s.IngestFile(filepath.Base(part.FileName()), part, true)
-		if err != nil {
-			log.Error(err)
-			continue
-		}
-
-		fmt.Fprintf(body, "<div><a href='/image/%[1]s'>%[1]s</a></div>\n", idHash)
 	}
 
-	fmt.Fprintf(w, `<!doctype html>
-<html>
-  <head>
-    <title>Eridanus</title>
-    <link rel="stylesheet" href="/static/style.css" />
-    <script src="/static/eridanus.js"></script>
-  </head>
-  <body>
-    <h1>Uploaded files</h1>
-    %s
-  </body>
-</html>`, body)
+	c.HTML(http.StatusOK, "uploaded.html", gin.H{
+		"Uploaded": uploaded,
+	})
 }
