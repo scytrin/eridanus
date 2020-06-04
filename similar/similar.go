@@ -1,4 +1,4 @@
-package server
+package similar
 
 import (
 	"fmt"
@@ -12,13 +12,14 @@ import (
 	"github.com/corona10/goimagehash"
 	log "github.com/sirupsen/logrus"
 	"gonum.org/v1/gonum/spatial/vptree"
+	"stadik.net/eridanus"
 )
 
 var gslSimilar sync.RWMutex
 
 type goimagehasher func(image.Image) (*goimagehash.ImageHash, error)
 
-func GeneratePHash(img image.Image) ([]string, error) {
+func GeneratePHashTag(img image.Image) ([]string, error) {
 	var tags []string
 
 	defer func() {
@@ -37,52 +38,28 @@ func GeneratePHash(img image.Image) ([]string, error) {
 	return tags, nil
 }
 
-type itemDistance map[string]float64
+type Similar map[string]map[string]float64
 
-func (m itemDistance) ByDistance() []string {
-	var simHashes []string
-	for rh := range m {
-		simHashes = append(simHashes, rh)
+func New(m eridanus.TagDB, effort int, maxDist float64) (Similar, error) {
+	tree, err := buildVPTree(m, 1) // minimal effort
+	if err != nil {
+		return nil, err
 	}
-	sort.SliceStable(simHashes, func(i, j int) bool {
-		// sort by shortest distance, then alphanumeric value
-		lh, rh := simHashes[i], simHashes[j]
-		if m[lh] == m[rh] {
-			return lh < rh
-		}
-		return m[lh] < m[rh]
-	})
-	return simHashes
-}
 
-type Similar map[string]itemDistance
+	findStart := time.Now()
+	similar := make(Similar)
+	similar.AddAllSimilar(tree, maxDist)
+	log.Infof("%s -- %d tree => %d similar @ d=%f",
+		time.Now().Sub(findStart), tree.Len(), similar.Len(), maxDist)
+
+	return similar, nil
+}
 
 func (m Similar) Len() int {
 	gslSimilar.RLock()
 	defer gslSimilar.RUnlock()
 
 	return len(m)
-}
-
-func (m Similar) Clear() {
-	gslSimilar.Lock()
-	defer gslSimilar.Unlock()
-
-	m = make(Similar)
-}
-
-func (m Similar) ByQuantity() []string {
-	var keys []string
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	sort.SliceStable(keys, func(i, j int) bool {
-		// sort by most similars
-		lh, rh := keys[i], keys[j]
-		return len(m[lh]) > len(m[rh])
-	})
-	return keys
 }
 
 func (m Similar) Distance(lh, rh string) float64 {
@@ -92,8 +69,28 @@ func (m Similar) Distance(lh, rh string) float64 {
 	return m[lh][rh]
 }
 
+func (m Similar) ByQuantity() []string {
+	var keys []string
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	sort.SliceStable(keys, func(i, j int) bool {
+		return len(m[keys[i]]) > len(m[keys[j]])
+	})
+	return keys
+}
+
 func (m Similar) ByDistance(idHash string) []string {
-	return m[idHash].ByDistance()
+	var keys []string
+	for rh := range m[idHash] {
+		keys = append(keys, rh)
+	}
+	sort.Strings(keys)
+	sort.SliceStable(keys, func(i, j int) bool {
+		return m[idHash][keys[i]] < m[idHash][keys[j]]
+	})
+	return keys
 }
 
 func (m Similar) Add(lh, rh string, d float64) error {
@@ -106,7 +103,7 @@ func (m Similar) Add(lh, rh string, d float64) error {
 
 	for _, h1 := range []string{lh, rh} {
 		if _, ok := m[h1]; !ok {
-			m[h1] = make(itemDistance)
+			m[h1] = make(map[string]float64)
 		}
 	}
 	m[lh][rh] = d
@@ -144,33 +141,7 @@ func (m Similar) AddAllSimilar(tree *vptree.Tree, maxDist float64) error {
 	return nil
 }
 
-func (m Similar) ApplyDuplicateTags(c Cache) error {
-	for lh, drh := range m {
-		for rh, d := range drh {
-			if err := c.AddTags(lh, fmt.Sprintf("duplicate:%s:%f", rh, d)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func buildSimilarImages(m Cache, effort int, maxDist float64) (Similar, error) {
-	tree, err := buildVPTree(m, 1) // minimal effort
-	if err != nil {
-		return nil, err
-	}
-
-	findStart := time.Now()
-	similar := make(Similar)
-	similar.AddAllSimilar(tree, maxDist)
-	log.Infof("%s -- %d tree => %d similar @ d=%f",
-		time.Now().Sub(findStart), tree.Len(), similar.Len(), maxDist)
-
-	return similar, nil
-}
-
-func buildVPTree(m Cache, effort int) (*vptree.Tree, error) {
+func buildVPTree(m eridanus.TagDB, effort int) (*vptree.Tree, error) {
 	hashes, err := buildHashes(m)
 	if err != nil {
 		return nil, err
@@ -185,7 +156,7 @@ func buildVPTree(m Cache, effort int) (*vptree.Tree, error) {
 	return tree, nil
 }
 
-func buildHashes(m Cache) ([]vptree.Comparable, error) {
+func buildHashes(m eridanus.TagDB) ([]vptree.Comparable, error) {
 	hashStart := time.Now()
 	var hashes []vptree.Comparable
 	if err := m.Range(func(idHash string, tags []string) error {
