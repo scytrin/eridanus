@@ -1,8 +1,6 @@
 package eridanus
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -11,34 +9,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:generate stringer -type=StringMatcherType
+//go:generate  enumer -json -text -yaml -sql -type=StringMatcherType
 type StringMatcherType int
-
-func (t StringMatcherType) MarshalYAML() interface{} {
-	return t.String()
-}
-
-func (t *StringMatcherType) UnmarshalYAML(unm func(interface{}) error) error {
-	var i interface{}
-	if err := unm(&i); err != nil {
-		return err
-	}
-	switch v := i.(type) {
-	case StringMatcherType:
-		*t = v
-	case int:
-		*t = StringMatcherType(v)
-	case string:
-		for _, e := range StringMatcherTypes {
-			if strings.ToLower(e.String()) == strings.ToLower(v) {
-				*t = e
-				return nil
-			}
-		}
-		return fmt.Errorf("%s not a valid %T", v, t)
-	}
-	return nil
-}
 
 const (
 	// Exact is an StringMatcherType enum.
@@ -47,35 +19,12 @@ const (
 	Regex
 )
 
-// Array of StringMatcherType enum values.
-var StringMatcherTypes = []StringMatcherType{
-	Exact,
-	Regex,
-}
-
 var stringMatcherFmt = regexp.MustCompile(`^(\w+:)?(\w+)(:\w+)?$`)
 
 type StringMatcher struct {
 	Type    StringMatcherType `yaml:",omitempty"`
 	Value   string            `yaml:",omitempty"`
 	Default string            `yaml:",omitempty"`
-}
-
-func (m StringMatcher) MarshalText() (text []byte, err error) {
-	s := fmt.Sprintf("%s:%s:%s", m.Type, m.Value, m.Default)
-	return bytes.Trim([]byte(s), " :"), nil
-}
-
-func (m *StringMatcher) UnmarshalText(text []byte) error {
-	if r := stringMatcherFmt.FindSubmatch(text); r != nil {
-		*m = StringMatcher{
-			// Type: StringMatcherType(r[1]),
-			Value:   string(r[2]),
-			Default: string(r[3]),
-		}
-		return nil
-	}
-	return errors.New("incompatible format")
 }
 
 func (m *StringMatcher) Match(value string) bool {
@@ -106,7 +55,7 @@ type ParamMatcher struct {
 	StringMatcher `yaml:",inline"`
 }
 
-//go:generate stringer -type=URLClassifierType
+//go:generate  enumer -json -text -yaml -sql -type=URLClassifierType
 type URLClassifierType int
 
 const (
@@ -119,40 +68,6 @@ const (
 	// Watch is an URLClassifierType enum.
 	Watch
 )
-
-// Array of URLClassifierType enum values.
-var URLClassifierTypes = []URLClassifierType{
-	File,
-	Post,
-	List,
-	Watch,
-}
-
-func (t URLClassifierType) MarshalYAML() interface{} {
-	return t.String()
-}
-
-func (t *URLClassifierType) UnmarshalYAML(unm func(interface{}) error) error {
-	var i interface{}
-	if err := unm(&i); err != nil {
-		return err
-	}
-	switch v := i.(type) {
-	case URLClassifierType:
-		*t = v
-	case int:
-		*t = URLClassifierType(v)
-	case string:
-		for _, e := range URLClassifierTypes {
-			if strings.ToLower(e.String()) == strings.ToLower(v) {
-				*t = e
-				return nil
-			}
-		}
-		return fmt.Errorf("%s not a valid %T", v, t)
-	}
-	return nil
-}
 
 type URLClassifier struct {
 	Name     string

@@ -2,7 +2,6 @@ package eridanus
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/antchfx/jsonquery"
 	"go.chromium.org/luci/common/data/stringset"
@@ -10,34 +9,8 @@ import (
 	"gopkg.in/xmlpath.v2"
 )
 
-//go:generate stringer -type=ParserOutputType
+//go:generate enumer -json -text -yaml -sql -type=ParserOutputType
 type ParserOutputType int
-
-func (t ParserOutputType) MarshalYAML() interface{} {
-	return t.String()
-}
-
-func (t *ParserOutputType) UnmarshalYAML(unm func(interface{}) error) error {
-	var i interface{}
-	if err := unm(&i); err != nil {
-		return err
-	}
-	switch v := i.(type) {
-	case ParserOutputType:
-		*t = v
-	case int:
-		*t = ParserOutputType(v)
-	case string:
-		for _, e := range ParserOutputTypes {
-			if strings.ToLower(e.String()) == strings.ToLower(v) {
-				*t = e
-				return nil
-			}
-		}
-		return fmt.Errorf("%s not a valid %T", v, t)
-	}
-	return nil
-}
 
 const (
 	// Content is an ParserOutputType enum.
@@ -53,16 +26,6 @@ const (
 	// MD5Hash is an ParserOutputType enum.
 	MD5Hash
 )
-
-// Array of ParserOutputType enum values.
-var ParserOutputTypes = [...]ParserOutputType{
-	Content,
-	Tag,
-	Follow,
-	Title,
-	Source,
-	MD5Hash,
-}
 
 // https://devhints.io/xpath
 type ParserDefinition struct {

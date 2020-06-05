@@ -25,6 +25,7 @@ import (
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
 	cookiejar "github.com/juju/persistent-cookiejar"
 	"github.com/kr/pretty"
+	"github.com/scytrin/eridanus/workerpool"
 	"github.com/sirupsen/logrus"
 	"go.chromium.org/luci/common/data/caching/cache"
 	"go.chromium.org/luci/common/data/stringset"
@@ -34,13 +35,11 @@ import (
 	"golang.org/x/net/publicsuffix"
 	"gopkg.in/xmlpath.v2"
 	"gopkg.in/yaml.v2"
-	"stadik.net/eridanus/workerpool"
 )
 
 //yaml.v2 https://play.golang.org/p/zt1Og9LIWNI
 //yaml.v3 https://play.golang.org/p/H9WhcWSfJHT
 
-//go:generate stringer -type=key
 type key int
 
 const (

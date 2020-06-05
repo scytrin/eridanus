@@ -12,8 +12,8 @@ import (
 
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
 	"github.com/nullseed/logruseq"
+	"github.com/scytrin/eridanus"
 	"github.com/sirupsen/logrus"
-	"stadik.net/eridanus"
 )
 
 var (
