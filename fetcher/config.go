@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"strings"
 
-	"github.com/gocolly/colly/v2"
 	"github.com/sirupsen/logrus"
 )
 
@@ -30,41 +28,41 @@ func (m *XPathMatcher) Match(u *url.URL) bool {
 	return match
 }
 
-func (m *XPathMatcher) Install(c *colly.Collector, fc *Config, fr *fetch) {
-	c.OnXML(m.Selector, func(e *colly.XMLElement) {
-		url := e.Request.URL.String()
-		value := e.Text
-		log := fr.log.WithFields(logrus.Fields{
-			"url":          url,
-			"matcher":      m,
-			"matcherValue": value,
-		})
+// func (m *XPathMatcher) Install(c *colly.Collector, fc *Config, fr *fetch) {
+// 	c.OnXML(m.Selector, func(e *colly.XMLElement) {
+// 		url := e.Request.URL.String()
+// 		value := e.Text
+// 		log := fr.log.WithFields(logrus.Fields{
+// 			"url":          url,
+// 			"matcher":      m,
+// 			"matcherValue": value,
+// 		})
 
-		if !fc.Match(e.Request.URL) {
-			log.Debugf("no match %s to %s", fc.Name, e.Request.URL)
-			return
-		}
+// 		if !fc.Match(e.Request.URL) {
+// 			log.Debugf("no match %s to %s", fc.Name, e.Request.URL)
+// 			return
+// 		}
 
-		if !m.Match(e.Request.URL) {
-			log.Debugf("no match %v to %s", m, url)
-			return
-		}
+// 		if !m.Match(e.Request.URL) {
+// 			log.Debugf("no match %v to %s", m, url)
+// 			return
+// 		}
 
-		if m.Prepend != "" {
-			value = m.Prepend + value
-		}
+// 		if m.Prepend != "" {
+// 			value = m.Prepend + value
+// 		}
 
-		if m.Append != "" {
-			value = value + m.Append
-		}
+// 		if m.Append != "" {
+// 			value = value + m.Append
+// 		}
 
-		if m.Type == "tag" {
-			value = strings.ToLower(value)
-		}
+// 		if m.Type == "tag" {
+// 			value = strings.ToLower(value)
+// 		}
 
-		fr.Add(url, m.Type, value)
-	})
-}
+// 		fr.Add(url, m.Type, value)
+// 	})
+// }
 
 type Config struct {
 	Name     string

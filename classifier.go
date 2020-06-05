@@ -9,7 +9,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:generate  enumer -json -text -yaml -sql -type=StringMatcherType
+//go:generate enumer -json -text -yaml -sql -type=StringMatcherType
+
+// StringMatcherType indicates how a StringMatcher matches data.
 type StringMatcherType int
 
 const (
@@ -19,14 +21,14 @@ const (
 	Regex
 )
 
-var stringMatcherFmt = regexp.MustCompile(`^(\w+:)?(\w+)(:\w+)?$`)
-
+// StringMatcher matches a string.
 type StringMatcher struct {
-	Type    StringMatcherType `yaml:",omitempty"`
 	Value   string            `yaml:",omitempty"`
 	Default string            `yaml:",omitempty"`
+	Type    StringMatcherType `yaml:",omitempty"`
 }
 
+// Match acts similarly to regexp.Regexp.Match.
 func (m *StringMatcher) Match(value string) bool {
 	if value == "" {
 		return false
@@ -50,12 +52,15 @@ func (m *StringMatcher) Match(value string) bool {
 	}
 }
 
+// ParamMatcher is a StringMatcher for matching URL query parameters.
 type ParamMatcher struct {
 	Key           string `yaml:",omitempty"`
 	StringMatcher `yaml:",inline"`
 }
 
-//go:generate  enumer -json -text -yaml -sql -type=URLClassifierType
+//go:generate enumer -json -text -yaml -sql -type=URLClassifierType
+
+// URLClassifierType specifies the category of URL.
 type URLClassifierType int
 
 const (
@@ -69,6 +74,7 @@ const (
 	Watch
 )
 
+// URLClassifier determines the actions taken on a URL and it's content.
 type URLClassifier struct {
 	Name     string
 	Type     URLClassifierType `yaml:",omitempty"`
@@ -148,6 +154,7 @@ func (uc *URLClassifier) normalizeQuery(ou *url.URL) (*url.URL, error) {
 	return u, nil
 }
 
+// Normalize returns a deterministic URL.
 func (uc *URLClassifier) Normalize(u *url.URL) (*url.URL, error) {
 	u, err := uc.normalizeDomain(u)
 	if err != nil {
@@ -216,6 +223,7 @@ func (uc *URLClassifier) matchQuery(u *url.URL) bool {
 	return true
 }
 
+// Match comparses the given URL to the URLCLassifier's specification.
 func (uc *URLClassifier) Match(u *url.URL) bool {
 	// https://github.com/hydrusnetwork/hydrus/blob/1976391fd0a37c9caf607127b7a9a2d86a197d3c/hydrus/client/networking/ClientNetworkingDomain.py#L3309
 	retval := uc.matchDomain(u) && uc.matchPath(u) && uc.matchQuery(u)
@@ -223,8 +231,10 @@ func (uc *URLClassifier) Match(u *url.URL) bool {
 	return retval
 }
 
+// URLClassifiers holds multiple URLClassifier instances.
 type URLClassifiers []*URLClassifier
 
+// For returns a URLClassifier instance appropriate for the URL.
 func (cs URLClassifiers) For(u *url.URL) *URLClassifier {
 	var keep *URLClassifier
 	for _, c := range cs {

@@ -1,10 +1,10 @@
+// Package eridanus is an implementation of a content retrieval, storage, and
+// categorizational system inspired by Hydrus Network.
 package eridanus
 
 import (
 	"bufio"
-	"bytes"
 	"context"
-	"crypto/sha1"
 	"errors"
 	"fmt"
 	"image"
@@ -24,7 +24,6 @@ import (
 	"github.com/gocolly/colly/v2/extensions"
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
 	cookiejar "github.com/juju/persistent-cookiejar"
-	"github.com/kr/pretty"
 	"github.com/scytrin/eridanus/workerpool"
 	"github.com/sirupsen/logrus"
 	"go.chromium.org/luci/common/data/caching/cache"
@@ -47,8 +46,10 @@ const (
 )
 
 var (
+	// Collector is a colly.Collector for fetching content.
 	Collector *colly.Collector
-	Client    *http.Client
+	// Client is used by Collector.
+	Client *http.Client
 
 	initLock    sync.Mutex
 	initDone    bool
@@ -64,10 +65,12 @@ var (
 	}
 )
 
+// Config holds configuration vlaues for eridanus.
 type Config struct {
 	LocalStorePath string
 }
 
+// Run starts the appropriate tasks for eridanus operations.
 func Run(ctx context.Context, cfg Config) error {
 	initLock.Lock()
 	defer initLock.Unlock()
@@ -153,11 +156,8 @@ func Run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
+// Save persists configuration to disk.
 func Save(ctx context.Context) error {
-	// log := ctxlogrus.Extract(ctx).WithFields(logrus.Fields{
-	// 	"path": path,
-	// })
-
 	if Client != nil && Client.Jar != nil {
 		if jar, ok := Client.Jar.(*cookiejar.Jar); ok && jar != nil {
 			if err := jar.Save(); err != nil {
@@ -169,6 +169,7 @@ func Save(ctx context.Context) error {
 	return nil
 }
 
+// Get retrieves a document from the internet.
 func Get(ctx context.Context, u *url.URL) (strpair.Map, error) {
 	log := ctxlogrus.Extract(ctx).WithFields(logrus.Fields{
 		"url": u.String(),
@@ -189,30 +190,39 @@ func Get(ctx context.Context, u *url.URL) (strpair.Map, error) {
 		return nil, err
 	}
 
-	results := make(strpair.Map)
+	ps := c.FindParsers(uc)
+	if ps == nil {
+		return nil, fmt.Errorf("no parsers for %s", u)
+	}
+
+	allResults := make(strpair.Map)
 	collector := Collector.Clone()
 	collector.OnScraped(func(res *colly.Response) {
-		contentType := res.Headers.Get("Content-Type")
-		contentReader := bytes.NewReader(res.Body)
-		resResults, err := c.Parse(nu, contentType, contentReader)
+		node, err := xmlpath.ParseHTML(res.Request.Body)
 		if err != nil {
 			log.Error(err)
 			return
 		}
-		log.Infof("\n%s\n%x\n%# v",
-			res.Request.URL.String(),
-			sha1.Sum([]byte(res.Request.URL.String())),
-			pretty.Formatter(resResults),
-		)
-		for k, vs := range resResults {
-			for _, v := range vs {
-				results.Add(k, v)
-				switch k {
-				case Follow.String(), Content.String():
-					if err := res.Request.Visit(v); err != nil {
-						log.Error(err)
-					}
+
+		results := make(strpair.Map)
+		for _, pName := range uc.Parsers {
+			p := c.GetParser(pName)
+			r, err := p.ParseHTML(node)
+			if err != nil {
+				logrus.Warn(err)
+				continue
+			}
+			for k, vs := range r {
+				for _, v := range vs {
+					results.Add(k, v)
+					allResults.Add(k, v)
 				}
+			}
+		}
+
+		for _, link := range results[Follow.String()] {
+			if err := res.Request.Visit(link); err != nil {
+				log.Error(err)
 			}
 		}
 	})
@@ -222,9 +232,11 @@ func Get(ctx context.Context, u *url.URL) (strpair.Map, error) {
 	}
 
 	collector.Wait()
-	return results, nil
+
+	return allResults, nil
 }
 
+// IDHash returns a hashsum that will be used to identify the content.
 func IDHash(r io.Reader) (isolated.HexDigest, error) {
 	return isolated.Hash(isolated.GetHash(contentStoreNS), r)
 }
@@ -236,6 +248,7 @@ func (c *writeCount) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+// GeneratePHashTags returns tags derived from the content oriented towards duplicate detection.
 func GeneratePHashTags(img image.Image) (tags []string, err error) {
 	defer func() {
 		if rerr, ok := recover().(error); rerr != nil && ok {
@@ -255,6 +268,7 @@ func GeneratePHashTags(img image.Image) (tags []string, err error) {
 	return tags, nil
 }
 
+// ContentDerivedTags returns tags related to the content's format.
 func ContentDerivedTags(idHash isolated.HexDigest) ([]string, error) {
 	rc, err := contentStore.Read(idHash)
 	if err != nil {
@@ -325,6 +339,7 @@ func Ingest(ctx context.Context, r io.Reader, tags ...string) (isolated.HexDiges
 	return idHash, nil
 }
 
+// Import ingests content present on a local disk.
 func Import(ctx context.Context, path string, ingest IngestFunc) error {
 	log := ctxlogrus.Extract(ctx).WithField("importsDir", path)
 
@@ -376,6 +391,7 @@ func Import(ctx context.Context, path string, ingest IngestFunc) error {
 	return nil
 }
 
+// SiteConfig is a container for site specific configuration.
 type SiteConfig struct {
 	Label       string
 	Domain      string
@@ -384,6 +400,7 @@ type SiteConfig struct {
 	// Generators  QueryDefinitions
 }
 
+// GetParser returns a parser from the SiteConfig by name.
 func (c *SiteConfig) GetParser(name string) *ParserDefinition {
 	for _, v := range c.Parsers {
 		if v.Name == name {
@@ -393,6 +410,21 @@ func (c *SiteConfig) GetParser(name string) *ParserDefinition {
 	return nil
 }
 
+// FindParsers returns parsers from the SiteConfig specified by the provided URLClassifier.
+func (c *SiteConfig) FindParsers(uc *URLClassifier) ParserDefinitions {
+	var ps ParserDefinitions
+	for _, name := range uc.Parsers {
+		p := c.GetParser(name)
+		if p == nil {
+			logrus.Errorf("parser %s not found", name)
+			continue
+		}
+		ps = append(ps, p)
+	}
+	return ps
+}
+
+// GetClassifier returns a URLClassifier specified by name.
 func (c *SiteConfig) GetClassifier(name string) *URLClassifier {
 	for _, v := range c.Classifiers {
 		if v.Name == name {
@@ -402,6 +434,7 @@ func (c *SiteConfig) GetClassifier(name string) *URLClassifier {
 	return nil
 }
 
+// FindClassifier returns a URLClassifier most appropriate for the given URL.
 func (c *SiteConfig) FindClassifier(u *url.URL) *URLClassifier {
 	for _, v := range c.Classifiers {
 		if v.Match(u) {
@@ -411,41 +444,10 @@ func (c *SiteConfig) FindClassifier(u *url.URL) *URLClassifier {
 	return nil
 }
 
-func (c *SiteConfig) Parse(u *url.URL, contentType string, r io.Reader) (strpair.Map, error) {
-	if !strings.Contains(contentType, "text/html") {
-		return nil, fmt.Errorf("can't handle %s", contentType)
-	}
-
-	uc := c.FindClassifier(u)
-	if uc == nil {
-		return nil, fmt.Errorf("no classifier found for %s", u)
-	}
-
-	results := strpair.ParseMap(nil)
-	node, err := xmlpath.ParseHTML(r)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, pName := range uc.Parsers {
-		p := c.GetParser(pName)
-		r, err := p.ParseHTML(node)
-		if err != nil {
-			logrus.Warn(err)
-			continue
-		}
-		for k, vs := range r {
-			for _, v := range vs {
-				results.Add(k, v)
-			}
-		}
-	}
-
-	return results, nil
-}
-
+// SiteConfigs holds multiple SiteConfig instances.
 type SiteConfigs []*SiteConfig
 
+// For returns a SiteConfig instance appropriate for the URL.
 func (cs SiteConfigs) For(u *url.URL) *SiteConfig {
 	for _, c := range cs {
 		if uc := c.FindClassifier(u); uc != nil {

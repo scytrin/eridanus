@@ -9,7 +9,10 @@ import (
 	"gopkg.in/xmlpath.v2"
 )
 
+// https://devhints.io/xpath
 //go:generate enumer -json -text -yaml -sql -type=ParserOutputType
+
+// ParserOutputType specifies the type of result from a parser.
 type ParserOutputType int
 
 const (
@@ -27,7 +30,7 @@ const (
 	MD5Hash
 )
 
-// https://devhints.io/xpath
+// ParserDefinition defines what a parser does.
 type ParserDefinition struct {
 	Name     string
 	Type     ParserOutputType `yaml:",omitempty"`
@@ -43,6 +46,7 @@ func (p *ParserDefinition) String() string {
 		p.Priority, p.Name, p.Type, p.Prepend, p.Value, p.Append)
 }
 
+// ParseHTML applies the parser to HTML.
 func (p *ParserDefinition) ParseHTML(node *xmlpath.Node) (strpair.Map, error) {
 	results := strpair.ParseMap(nil)
 	xpath, err := xmlpath.Compile(p.Value)
@@ -59,6 +63,7 @@ func (p *ParserDefinition) ParseHTML(node *xmlpath.Node) (strpair.Map, error) {
 	return results, nil
 }
 
+// ParseJSON applies the parser to JSON.
 func (p *ParserDefinition) ParseJSON(node *jsonquery.Node) (strpair.Map, error) {
 	results := strpair.ParseMap(nil)
 	nodes, err := jsonquery.QueryAll(node, p.Value)
@@ -72,8 +77,10 @@ func (p *ParserDefinition) ParseJSON(node *jsonquery.Node) (strpair.Map, error) 
 	return results, nil
 }
 
+// ParserDefinitions contains multiple ParserDefinition instances.
 type ParserDefinitions []*ParserDefinition
 
+// For returns ParserDefinition instances specified by the URLCLassifier.
 func (ps ParserDefinitions) For(c *URLClassifier) ParserDefinitions {
 	var keep ParserDefinitions
 	parserNames := stringset.NewFromSlice(c.Parsers...)
