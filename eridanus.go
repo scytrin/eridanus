@@ -3,35 +3,24 @@
 package eridanus
 
 import (
-	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
-	"image"
 	"io"
-	"io/ioutil"
+	"math/big"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/corona10/goimagehash"
 	"github.com/gocolly/colly/v2"
-	"github.com/gocolly/colly/v2/debug"
 	"github.com/gocolly/colly/v2/extensions"
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
-	cookiejar "github.com/juju/persistent-cookiejar"
-	"github.com/scytrin/eridanus/workerpool"
 	"github.com/sirupsen/logrus"
-	"go.chromium.org/luci/common/data/caching/cache"
-	"go.chromium.org/luci/common/data/stringset"
 	"go.chromium.org/luci/common/data/strpair"
-	"go.chromium.org/luci/common/data/text/units"
-	"go.chromium.org/luci/common/isolated"
-	"golang.org/x/net/publicsuffix"
 	"gopkg.in/xmlpath.v2"
 	"gopkg.in/yaml.v2"
 )
@@ -39,31 +28,35 @@ import (
 //yaml.v2 https://play.golang.org/p/zt1Og9LIWNI
 //yaml.v3 https://play.golang.org/p/H9WhcWSfJHT
 
-type key int
-
 const (
-	serverKey key = iota
+	classesBlobKey = "classes.yaml"
+	parsersBlobKey = "parsers.yaml"
 )
 
 var (
+	contentStore Storage
+	parsers      Parsers
+	classes      URLClassifiers
+
 	// Collector is a colly.Collector for fetching content.
 	Collector *colly.Collector
-	// Client is used by Collector.
-	Client *http.Client
-
-	initLock    sync.Mutex
-	initDone    bool
-	maxWorkers  = 50
-	persistDir  = ""
-	siteConfigs SiteConfigs
-
-	contentStore         cache.Cache
-	contentStoreNS       = "sha256-content"
-	contentStorePolicies = cache.Policies{
-		MaxItems:     1e10,
-		MinFreeSpace: units.Size(8e+9),
-	}
 )
+
+// IDHash returns a hashsum that will be used to identify the content.
+func IDHash(r io.Reader) (string, error) {
+	h := sha256.New()
+	io.Copy(h, r)
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// HashToHexColor returns a value acceptable to use in specifying color.
+func HashToHexColor(idHash string) string {
+	i := big.NewInt(0)
+	if _, ok := i.SetString(idHash, 16); !ok {
+		return ""
+	}
+	return i.Mod(i, big.NewInt(0xffffff)).Text(16)
+}
 
 // Config holds configuration vlaues for eridanus.
 type Config struct {
@@ -72,387 +65,207 @@ type Config struct {
 
 // Run starts the appropriate tasks for eridanus operations.
 func Run(ctx context.Context, cfg Config) error {
-	initLock.Lock()
-	defer initLock.Unlock()
 	log := ctxlogrus.Extract(ctx)
-	if !initDone {
-		if cfg.LocalStorePath == "" {
-			return errors.New("LocalStorePath is not specified")
-		}
 
-		persistDir = cfg.LocalStorePath
-		log = log.WithField("persistDir", persistDir)
-
-		localContentStore, err := cache.NewDisk(
-			contentStorePolicies,
-			filepath.Join(persistDir, "content"),
-			contentStoreNS)
-		if err != nil {
-			return err
-		}
-		contentStore = localContentStore
-
-		jar, err := cookiejar.New(&cookiejar.Options{
-			PublicSuffixList: publicsuffix.List,
-			Filename:         filepath.Join(persistDir, "cookies"),
-		})
-		if err != nil {
-			return err
-		}
-
-		Client = &http.Client{
-			Transport: &http.Transport{
-				MaxIdleConns:       10,
-				IdleConnTimeout:    30 * time.Second,
-				DisableCompression: true,
-			},
-			Jar: jar,
-		}
-
-		o := []colly.CollectorOption{
-			colly.Async(true),
-			colly.IgnoreRobotsTxt(),
-			colly.MaxBodySize(8e+7), // 10MB
-			colly.MaxDepth(3),
-			colly.CacheDir(filepath.Join(persistDir, "colly")),
-		}
-		if false {
-			o = append(o, colly.Debugger(new(debug.LogDebugger)))
-		}
-		Collector = colly.NewCollector(o...)
-		Collector.CheckHead = true
-		Collector.SetClient(Client)
-		extensions.Referer(Collector)
-		extensions.RandomUserAgent(Collector)
-
-		if err := filepath.Walk(filepath.Join(persistDir, "sites"), func(p string, i os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if i.IsDir() {
-				return nil
-			}
-			f, err := os.Open(p)
-			if err != nil {
-				log.Error(err)
-				return nil
-			}
-			var siteConfig SiteConfig
-			if err := yaml.NewDecoder(f).Decode(&siteConfig); err != nil {
-				log.Error(err)
-				return nil
-			}
-			siteConfigs = append(siteConfigs, &siteConfig)
-			return nil
-		}); err != nil {
-			return err
-		}
-		initDone = true
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
-	yr, _ := yaml.Marshal(siteConfigs)
-	log.Info(string(yr))
+	if cfg.LocalStorePath == "" {
+		return errors.New("LocalStorePath is not specified")
+	}
+
+	log = log.WithField("LocalStorePath", cfg.LocalStorePath)
+
+	localContentStore, err := NewStorage(filepath.Join(cfg.LocalStorePath, "content"))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := localContentStore.Close(); err != nil {
+			log.Error(err)
+		}
+	}()
+	contentStore = localContentStore
+
+	cReader, err := contentStore.GetData(ctx, classesBlobKey, nil)
+	if err != nil {
+		if err != ErrBlobNotFound {
+			return err
+		}
+	} else if err := yaml.NewDecoder(cReader).Decode(&classes); err != nil {
+		return err
+	}
+
+	pReader, err := contentStore.GetData(ctx, parsersBlobKey, nil)
+	if err != nil {
+		if err != ErrBlobNotFound {
+			return err
+		}
+	} else if err := yaml.NewDecoder(pReader).Decode(&parsers); err != nil {
+		return err
+	}
+
+	Collector = colly.NewCollector()
+	Collector.Async = true
+	Collector.CheckHead = true
+	Collector.IgnoreRobotsTxt = true
+	Collector.MaxBodySize = 8e+7 // 10MB
+	// Collector.CacheDir = filepath.Join(cfg.LocalStorePath, "colly")
+	Collector.SetStorage(contentStore.AsCollyStorage())
+	Collector.WithTransport(&http.Transport{
+		MaxIdleConns:       3,
+		IdleConnTimeout:    30 * time.Second,
+		DisableCompression: true,
+	})
+	extensions.Referer(Collector)
+
+	for _, us := range []string{
+		// "https://pictures.hentai-foundry.com/f/Felox08/792226/Felox08-792226-Snowflake_-_Re_design.jpg",
+		"https://www.hentai-foundry.com/pictures/user/Felox08/792226/Snowflake---Re-design",
+		"https://www.hentai-foundry.com/pictures/user/Felox08/798105/Singularity",
+		// "https://www.hentai-foundry.com/pictures/user/Felox08",
+		// "https://www.hentai-foundry.com/user/Felox08/profile",
+	} {
+		u, err := url.Parse(us)
+		if err != nil {
+			log.Error(err)
+			continue
+		}
+		results, err := Get(ctx, u)
+		if err != nil {
+			log.Error(err)
+			continue
+		}
+		log.Debugf("%s\n%s", u.String(), strings.Join(results.Format(), "\n"))
+	}
+
+	cBytes, err := yaml.Marshal(classes)
+	if err != nil {
+		log.Error(err)
+	} else if err := contentStore.PutData(ctx, classesBlobKey, bytes.NewReader(cBytes), nil); err != nil {
+		return err
+	}
+
+	pBytes, err := yaml.Marshal(parsers)
+	if err != nil {
+		log.Error(err)
+	} else if err := contentStore.PutData(ctx, parsersBlobKey, bytes.NewReader(pBytes), nil); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-// Save persists configuration to disk.
-func Save(ctx context.Context) error {
-	if Client != nil && Client.Jar != nil {
-		if jar, ok := Client.Jar.(*cookiejar.Jar); ok && jar != nil {
-			if err := jar.Save(); err != nil {
-				return err
+type resultsCollector struct {
+	ctx     context.Context
+	results []strpair.Map
+	result  strpair.Map
+}
+
+func (rc *resultsCollector) Get(u *url.URL) error {
+	if rc.result == nil {
+		rc.result = make(strpair.Map)
+	}
+
+	c := Collector.Clone()
+	c.OnResponse(rc.onResponse)
+	c.Request("GET", u.String(), nil, nil, nil)
+	c.Wait()
+
+	return nil
+}
+
+func (rc *resultsCollector) onResponse(res *colly.Response) {
+	ru := res.Request.URL
+	log := ctxlogrus.Extract(rc.ctx).WithField("url", ru.String())
+
+	uc := FindClassifier(ru)
+	if uc == nil {
+		log.Errorf("no classification for %s", ru)
+		return
+	}
+
+	u, err := uc.Normalize(ru)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	ps := FindParsers(uc)
+	if ps == nil {
+		log.Errorf("no parsers for %s", u)
+		return
+	}
+
+	urlHash, err := IDHash(strings.NewReader(u.String()))
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	if err := contentStore.PutData(rc.ctx,
+		"/webcache/"+urlHash,
+		bytes.NewReader(res.Body), nil); err != nil {
+		log.Error(err)
+	}
+
+	node, err := xmlpath.ParseHTML(bytes.NewReader(res.Body))
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	results := strpair.ParseMap(rc.result[urlHash])
+	results.Set("@", u.String())
+	for _, p := range ps {
+		if p.Value == "" {
+			continue
+		}
+		r, err := p.ParseHTML(node)
+		if err != nil {
+			logrus.Warn(err)
+			continue
+		}
+		for k, vs := range r {
+			for _, v := range vs {
+				if k == Follow.String() || k == Content.String() {
+					v = res.Request.AbsoluteURL(v)
+				}
+				results.Add(k, v)
 			}
 		}
 	}
 
-	return nil
+	for _, link := range results[Content.String()] {
+		if err := res.Request.Visit(link); err != nil {
+			log.WithField("url", link).Error(err)
+		}
+	}
+
+	for _, link := range results[Follow.String()] {
+		if err := res.Request.Visit(link); err != nil {
+			log.WithField("url", link).Error(err)
+		}
+	}
+
+	if _, ok := rc.result[urlHash]; ok {
+		log.Infof("deleting %v", rc.result[urlHash])
+		rc.result.Del(urlHash)
+	}
+	for _, pair := range results.Format() {
+		rc.result.Add(urlHash, pair)
+	}
+	rc.results = append(rc.results, results)
 }
 
 // Get retrieves a document from the internet.
 func Get(ctx context.Context, u *url.URL) (strpair.Map, error) {
-	log := ctxlogrus.Extract(ctx).WithFields(logrus.Fields{
-		"url": u.String(),
-	})
-
-	c := siteConfigs.For(u)
-	if c == nil {
-		return nil, fmt.Errorf("no site config for %s", u)
+	log := ctxlogrus.Extract(ctx)
+	rc := resultsCollector{
+		ctx: ctxlogrus.ToContext(ctx, log),
 	}
+	rc.Get(u)
 
-	uc := c.FindClassifier(u)
-	if uc == nil {
-		return nil, fmt.Errorf("no classification for %s", u)
-	}
-
-	nu, err := uc.Normalize(u)
-	if err != nil {
-		return nil, err
-	}
-
-	ps := c.FindParsers(uc)
-	if ps == nil {
-		return nil, fmt.Errorf("no parsers for %s", u)
-	}
-
-	allResults := make(strpair.Map)
-	collector := Collector.Clone()
-	collector.OnScraped(func(res *colly.Response) {
-		node, err := xmlpath.ParseHTML(res.Request.Body)
-		if err != nil {
-			log.Error(err)
-			return
-		}
-
-		results := make(strpair.Map)
-		for _, pName := range uc.Parsers {
-			p := c.GetParser(pName)
-			r, err := p.ParseHTML(node)
-			if err != nil {
-				logrus.Warn(err)
-				continue
-			}
-			for k, vs := range r {
-				for _, v := range vs {
-					results.Add(k, v)
-					allResults.Add(k, v)
-				}
-			}
-		}
-
-		for _, link := range results[Follow.String()] {
-			if err := res.Request.Visit(link); err != nil {
-				log.Error(err)
-			}
-		}
-	})
-
-	if err := collector.Visit(nu.String()); err != nil {
-		return nil, err
-	}
-
-	collector.Wait()
-
-	return allResults, nil
-}
-
-// IDHash returns a hashsum that will be used to identify the content.
-func IDHash(r io.Reader) (isolated.HexDigest, error) {
-	return isolated.Hash(isolated.GetHash(contentStoreNS), r)
-}
-
-type writeCount int
-
-func (c *writeCount) Write(p []byte) (n int, err error) {
-	*c = writeCount(int(*c) + len(p))
-	return len(p), nil
-}
-
-// GeneratePHashTags returns tags derived from the content oriented towards duplicate detection.
-func GeneratePHashTags(img image.Image) (tags []string, err error) {
-	defer func() {
-		if rerr, ok := recover().(error); rerr != nil && ok {
-			logrus.Error(rerr)
-			tags = nil
-			err = rerr
-		}
-	}()
-	hsh, err := goimagehash.PerceptionHash(img)
-	if err != nil {
-		return nil, err
-	}
-	if hsh.GetHash() > 0 {
-		tags = append(tags, fmt.Sprintf("phash:%s", hsh.ToString()))
-	}
-
-	return tags, nil
-}
-
-// ContentDerivedTags returns tags related to the content's format.
-func ContentDerivedTags(idHash isolated.HexDigest) ([]string, error) {
-	rc, err := contentStore.Read(idHash)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-
-	var c writeCount
-	r := io.TeeReader(rc, &c)
-
-	img, imgFormat, err := image.Decode(r)
-	if err != nil {
-		return nil, err
-	}
-
-	tags, err := GeneratePHashTags(img)
-	if err != nil {
-		logrus.Warnf("%s GeneratePHash: %v", idHash, err)
-	}
-
-	tags = append(tags,
-		fmt.Sprintf("format:%s", imgFormat),
-		fmt.Sprintf("filesize:%d", c),
-		fmt.Sprintf("dimensions:%dx%d", img.Bounds().Size().X, img.Bounds().Size().Y),
-	)
-
-	return tags, nil
-}
-
-// AddTags optionally creates a .txt file containing tags.
-func AddTags(idHash isolated.HexDigest, tags ...string) error {
-	tagFilePath := "" // FIXME
-	tagSet := stringset.NewFromSlice(tags...)
-
-	tagFile, err := os.Open(tagFilePath)
-	if err != nil {
-		logrus.Warning(err)
-	} else {
-		for s := bufio.NewScanner(tagFile); s.Scan(); {
-			tagSet.Add(s.Text())
-		}
-	}
-
-	data := []byte(strings.Join(tagSet.ToSortedSlice(), "\n"))
-	return ioutil.WriteFile(tagFilePath, data, 0644)
-}
-
-// IngestFunc receives content as an io.Reader and adds it to storage.
-type IngestFunc func(context.Context, io.Reader, ...string) (string, error)
-
-// Ingest implements IngestFunc.
-func Ingest(ctx context.Context, r io.Reader, tags ...string) (isolated.HexDigest, error) {
-	idHash, err := IDHash(strings.NewReader("meeeeeh"))
-	if err != nil {
-		return idHash, err
-	}
-	if err := contentStore.Add(idHash, r); err != nil {
-		return idHash, err
-	}
-	cdTags, err := ContentDerivedTags(idHash)
-	if err != nil {
-		return idHash, err
-	}
-	tags = append(tags, cdTags...)
-	if err := AddTags(idHash, tags...); err != nil {
-		return idHash, err
-	}
-	return idHash, nil
-}
-
-// Import ingests content present on a local disk.
-func Import(ctx context.Context, path string, ingest IngestFunc) error {
-	log := ctxlogrus.Extract(ctx).WithField("importsDir", path)
-
-	dirs, err := filepath.Glob(path)
-	if err != nil {
-		return err
-	}
-
-	pool := workerpool.NewPool(10)
-	defer pool.Close()
-
-	walkStart := time.Now()
-	for _, dir := range dirs {
-		if err := filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
-			if walkErr != nil {
-				log.Warn(walkErr)
-				return walkErr
-			}
-
-			if info.IsDir() {
-				return nil
-			}
-
-			pool.Do(ctx, func(ctx context.Context) {
-				f, err := os.Open(path)
-				if err != nil {
-					log.Error(err)
-					return
-				}
-				defer f.Close()
-
-				idHash, err := ingest(ctx, f,
-					fmt.Sprint("source:import"),
-					fmt.Sprintf("filename:%s", filepath.Base(path)))
-				if err != nil {
-					log.Error(err)
-				}
-
-				log.Infof("%s => %s", path, idHash)
-			})
-
-			return nil
-		}); err != nil {
-			log.Error(err)
-		}
-	}
-	log.Infof("%s -- walking %s", time.Now().Sub(walkStart), path)
-
-	return nil
-}
-
-// SiteConfig is a container for site specific configuration.
-type SiteConfig struct {
-	Label       string
-	Domain      string
-	Parsers     ParserDefinitions
-	Classifiers URLClassifiers
-	// Generators  QueryDefinitions
-}
-
-// GetParser returns a parser from the SiteConfig by name.
-func (c *SiteConfig) GetParser(name string) *ParserDefinition {
-	for _, v := range c.Parsers {
-		if v.Name == name {
-			return v
-		}
-	}
-	return nil
-}
-
-// FindParsers returns parsers from the SiteConfig specified by the provided URLClassifier.
-func (c *SiteConfig) FindParsers(uc *URLClassifier) ParserDefinitions {
-	var ps ParserDefinitions
-	for _, name := range uc.Parsers {
-		p := c.GetParser(name)
-		if p == nil {
-			logrus.Errorf("parser %s not found", name)
-			continue
-		}
-		ps = append(ps, p)
-	}
-	return ps
-}
-
-// GetClassifier returns a URLClassifier specified by name.
-func (c *SiteConfig) GetClassifier(name string) *URLClassifier {
-	for _, v := range c.Classifiers {
-		if v.Name == name {
-			return v
-		}
-	}
-	return nil
-}
-
-// FindClassifier returns a URLClassifier most appropriate for the given URL.
-func (c *SiteConfig) FindClassifier(u *url.URL) *URLClassifier {
-	for _, v := range c.Classifiers {
-		if v.Match(u) {
-			return v
-		}
-	}
-	return nil
-}
-
-// SiteConfigs holds multiple SiteConfig instances.
-type SiteConfigs []*SiteConfig
-
-// For returns a SiteConfig instance appropriate for the URL.
-func (cs SiteConfigs) For(u *url.URL) *SiteConfig {
-	for _, c := range cs {
-		if uc := c.FindClassifier(u); uc != nil {
-			return c
-		}
-	}
-	return nil
+	return rc.result, nil
 }

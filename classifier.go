@@ -1,6 +1,10 @@
 package eridanus
 
+//go:generate enumer -json -text -yaml -sql -type=StringMatcherType
+//go:generate enumer -json -text -yaml -sql -type=URLClassifierType
+
 import (
+	"bytes"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -8,8 +12,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 )
-
-//go:generate enumer -json -text -yaml -sql -type=StringMatcherType
 
 // StringMatcherType indicates how a StringMatcher matches data.
 type StringMatcherType int
@@ -28,6 +30,40 @@ type StringMatcher struct {
 	Type    StringMatcherType `yaml:",omitempty"`
 }
 
+func (m *StringMatcher) String() string {
+	out := bytes.NewBuffer(nil)
+	switch m.Type {
+	case Exact:
+		fmt.Fprintf(out, "%s", m.Value)
+	case Regex:
+		fmt.Fprintf(out, "{%s}", m.Value)
+	}
+	if m.Default != "" {
+		fmt.Fprintf(out, ":%s", m.Default)
+	}
+	return out.String()
+}
+
+// MarshalText to satisfy encoding.TextMarshaler
+func (m StringMatcher) MarshalText() (text []byte, err error) {
+	return []byte(m.String()), nil
+}
+
+// UnmarshalText to satisfy encoding.TextUnmarshaler
+func (m *StringMatcher) UnmarshalText(text []byte) error {
+	nm := StringMatcher{Value: string(text)}
+	if i := strings.LastIndex(nm.Value, ":"); i > -1 {
+		nm.Default = nm.Value[i+1:]
+		nm.Value = nm.Value[:i]
+	}
+	if strings.HasPrefix(nm.Value, "{") && strings.HasSuffix(nm.Value, "}") {
+		nm.Type = Regex
+		nm.Value = strings.Trim(nm.Value, "{}")
+	}
+	*m = nm
+	return nil
+}
+
 // Match acts similarly to regexp.Regexp.Match.
 func (m *StringMatcher) Match(value string) bool {
 	if value == "" {
@@ -37,18 +73,30 @@ func (m *StringMatcher) Match(value string) bool {
 		return true
 	}
 	switch m.Type {
+	default:
+		logrus.Error("match has no defined type")
+		return false
 	case Exact:
 		return m.Value == value
 	case Regex:
-		match, err := regexp.MatchString(m.Value, value)
+		pattern, ok := map[string]string{
+			"any":    `[^/]+`,
+			"alpha":  `[A-Za-z]`,
+			"alphas": `[A-Za-z]+`,
+			"digit":  `[0-9]`,
+			"digits": `[0-9]+`,
+			"alnum":  `[A-Za-z0-9]`,
+			"alnums": `[A-Za-z0-9]+`,
+		}[m.Value]
+		if !ok {
+			pattern = m.Value
+		}
+		match, err := regexp.MatchString(pattern, value)
 		if err != nil {
 			logrus.Error(err)
 			return false
 		}
 		return match
-	default:
-		logrus.Error("match has no defined type")
-		return false
 	}
 }
 
@@ -58,7 +106,23 @@ type ParamMatcher struct {
 	StringMatcher `yaml:",inline"`
 }
 
-//go:generate enumer -json -text -yaml -sql -type=URLClassifierType
+func (m *ParamMatcher) String() string {
+	return fmt.Sprintf("%s=%s", m.Key, m.StringMatcher.String())
+}
+
+// MarshalText satisfies encoding.TextMarshaler
+func (m ParamMatcher) MarshalText() (text []byte, err error) {
+	return []byte(m.String()), nil
+}
+
+// UnmarshalText satisfies encoding.TextUnmarshaler
+func (m *ParamMatcher) UnmarshalText(text []byte) error {
+	parts := bytes.SplitN(text, []byte("="), 2)
+	nm := ParamMatcher{Key: string(parts[0])}
+	nm.StringMatcher.UnmarshalText(parts[1])
+	*m = nm
+	return nil
+}
 
 // URLClassifierType specifies the category of URL.
 type URLClassifierType int
@@ -226,13 +290,22 @@ func (uc *URLClassifier) matchQuery(u *url.URL) bool {
 // Match comparses the given URL to the URLCLassifier's specification.
 func (uc *URLClassifier) Match(u *url.URL) bool {
 	// https://github.com/hydrusnetwork/hydrus/blob/1976391fd0a37c9caf607127b7a9a2d86a197d3c/hydrus/client/networking/ClientNetworkingDomain.py#L3309
-	retval := uc.matchDomain(u) && uc.matchPath(u) && uc.matchQuery(u)
-	logrus.Debug(uc.Name, " ", retval, " ", u)
-	return retval
+	md, mp, mq := uc.matchDomain(u), uc.matchPath(u), uc.matchQuery(u)
+	logrus.Debug(uc.Name, " ", []bool{md, mp, mq}, " ", u)
+	return md && mp && mq
 }
 
 // URLClassifiers holds multiple URLClassifier instances.
 type URLClassifiers []*URLClassifier
+
+// Names provides the names of all included classifiers.
+func (cs URLClassifiers) Names() []string {
+	var names []string
+	for _, c := range cs {
+		names = append(names, c.Name)
+	}
+	return names
+}
 
 // For returns a URLClassifier instance appropriate for the URL.
 func (cs URLClassifiers) For(u *url.URL) *URLClassifier {
@@ -243,4 +316,24 @@ func (cs URLClassifiers) For(u *url.URL) *URLClassifier {
 		}
 	}
 	return keep
+}
+
+// GetClassifier returns a URLClassifier specified by name.
+func GetClassifier(name string) *URLClassifier {
+	for _, v := range classes {
+		if v.Name == name {
+			return v
+		}
+	}
+	return nil
+}
+
+// FindClassifier returns a URLClassifier most appropriate for the given URL.
+func FindClassifier(u *url.URL) *URLClassifier {
+	for _, v := range classes {
+		if v.Match(u) {
+			return v
+		}
+	}
+	return nil
 }

@@ -1,3 +1,5 @@
+// Binary eridanus runs eridanus.
+
 //BREAK go:generate rsrc -manifest main.manifest -o rsrc.syso
 package main
 
@@ -6,8 +8,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"path"
-	"runtime"
 	"sort"
 
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
@@ -17,33 +17,35 @@ import (
 )
 
 var (
-	persistDirDefault = `C:\Users\scytr\Documents\EridanusStore`
+	persistDirDefault = `Z:\EridanusStore`
 	cfg               = eridanus.Config{}
 )
 
+func init() {
+	flag.StringVar(&cfg.LocalStorePath, "persist", persistDirDefault, "")
+}
+
 func main() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
+	flag.Parse()
 
 	// logrus.SetLevel(logrus.DebugLevel)
 	logrus.SetReportCaller(true)
 	logrus.SetFormatter(&EFormatter{})
 	logrus.AddHook(logruseq.NewSeqHook("http://localhost:5341"))
 	log := logrus.StandardLogger()
-
 	ctx := ctxlogrus.ToContext(context.Background(), logrus.NewEntry(log))
-
-	flag.StringVar(&cfg.LocalStorePath, "persist", persistDirDefault, "")
-	flag.Parse()
 
 	if err := eridanus.Run(ctx, cfg); err != nil {
 		log.Fatal(err)
 	}
 
-	log.Exit(0)
+	log.Info("DONE!!!!!")
 }
 
+// EFormatter is an implementation of a logrus.Formatter for use with eridanus.
 type EFormatter struct{ logrus.TextFormatter }
 
+// Format formats a logrus.Entry instance.
 func (f *EFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	buf := bytes.NewBuffer(nil)
 	fmt.Fprintf(buf, "%s %s -- %s\n",
@@ -53,7 +55,7 @@ func (f *EFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	)
 	if entry.Caller != nil {
 		fmt.Fprintf(buf, "  logCall = %s:%d\n",
-			path.Base(entry.Caller.File), entry.Caller.Line)
+			entry.Caller.File, entry.Caller.Line)
 	}
 	var keys []string
 	for k := range entry.Data {

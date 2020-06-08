@@ -1,16 +1,20 @@
 package eridanus
 
+//go:generate enumer -json -text -yaml -sql -type=ParserOutputType
+//go:generate enumer -json -text -yaml -sql -type=ParserOpType
+
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/antchfx/jsonquery"
+	"github.com/sirupsen/logrus"
 	"go.chromium.org/luci/common/data/stringset"
 	"go.chromium.org/luci/common/data/strpair"
 	"gopkg.in/xmlpath.v2"
 )
 
 // https://devhints.io/xpath
-//go:generate enumer -json -text -yaml -sql -type=ParserOutputType
 
 // ParserOutputType specifies the type of result from a parser.
 type ParserOutputType int
@@ -30,24 +34,34 @@ const (
 	MD5Hash
 )
 
-// ParserDefinition defines what a parser does.
-type ParserDefinition struct {
+// ParserOp is an operation used when parsing content.
+type ParserOp struct {
+	Regex,
+	XPath string
+}
+
+// Parser defines what a parser does.
+type Parser struct {
 	Name     string
 	Type     ParserOutputType `yaml:",omitempty"`
 	Priority int              `yaml:",omitempty"`
 
+	Recipie []*ParserOp
+
 	Value   string
 	Prepend string `yaml:",omitempty"`
 	Append  string `yaml:",omitempty"`
+
+	ExampleURLs []string
 }
 
-func (p *ParserDefinition) String() string {
+func (p *Parser) String() string {
 	return fmt.Sprintf("ParserDefinition{%d %s %s[%q %q %q]}",
 		p.Priority, p.Name, p.Type, p.Prepend, p.Value, p.Append)
 }
 
 // ParseHTML applies the parser to HTML.
-func (p *ParserDefinition) ParseHTML(node *xmlpath.Node) (strpair.Map, error) {
+func (p *Parser) ParseHTML(node *xmlpath.Node) (strpair.Map, error) {
 	results := strpair.ParseMap(nil)
 	xpath, err := xmlpath.Compile(p.Value)
 	if err != nil {
@@ -58,13 +72,15 @@ func (p *ParserDefinition) ParseHTML(node *xmlpath.Node) (strpair.Map, error) {
 	}
 	for iter := xpath.Iter(node); iter.Next(); {
 		value := p.Prepend + iter.Node().String() + p.Append
-		results.Add(p.Type.String(), value)
+		if value != "" {
+			results.Add(p.Type.String(), value)
+		}
 	}
 	return results, nil
 }
 
 // ParseJSON applies the parser to JSON.
-func (p *ParserDefinition) ParseJSON(node *jsonquery.Node) (strpair.Map, error) {
+func (p *Parser) ParseJSON(node *jsonquery.Node) (strpair.Map, error) {
 	results := strpair.ParseMap(nil)
 	nodes, err := jsonquery.QueryAll(node, p.Value)
 	if err != nil {
@@ -77,12 +93,21 @@ func (p *ParserDefinition) ParseJSON(node *jsonquery.Node) (strpair.Map, error) 
 	return results, nil
 }
 
-// ParserDefinitions contains multiple ParserDefinition instances.
-type ParserDefinitions []*ParserDefinition
+// Parsers contains multiple ParserDefinition instances.
+type Parsers []*Parser
+
+// Names provides the names of all included parsers.
+func (ps Parsers) Names() []string {
+	var names []string
+	for _, p := range ps {
+		names = append(names, p.Name)
+	}
+	return names
+}
 
 // For returns ParserDefinition instances specified by the URLCLassifier.
-func (ps ParserDefinitions) For(c *URLClassifier) ParserDefinitions {
-	var keep ParserDefinitions
+func (ps Parsers) For(c *URLClassifier) Parsers {
+	var keep Parsers
 	parserNames := stringset.NewFromSlice(c.Parsers...)
 	for _, p := range ps {
 		if parserNames.Has(p.Name) {
@@ -90,4 +115,32 @@ func (ps ParserDefinitions) For(c *URLClassifier) ParserDefinitions {
 		}
 	}
 	return keep
+}
+
+// GetParser returns a parser by name.
+func GetParser(name string) *Parser {
+	for _, v := range parsers {
+		if v.Name == name {
+			return v
+		}
+	}
+	return nil
+}
+
+// FindParsers returns parsers applicable to the provided URLClassifier.
+func FindParsers(uc *URLClassifier) Parsers {
+	var ps Parsers
+	for _, p := range parsers {
+		for _, us := range p.ExampleURLs {
+			u, err := url.Parse(us)
+			if err != nil {
+				logrus.Warn(err)
+				continue
+			}
+			if uc.Match(u) {
+				ps = append(ps, p)
+			}
+		}
+	}
+	return ps
 }
