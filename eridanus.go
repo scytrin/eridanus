@@ -2,165 +2,203 @@
 // categorizational system inspired by Hydrus Network.
 package eridanus
 
+//go:generate protoc --go_out=paths=source_relative:. eridanus.proto
+
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gocolly/colly/v2"
 	"github.com/gocolly/colly/v2/extensions"
+	collyStorage "github.com/gocolly/colly/v2/storage"
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
-	"github.com/sirupsen/logrus"
+	"github.com/scytrin/eridanus/idhash"
+	"github.com/scytrin/eridanus/storage"
 	"go.chromium.org/luci/common/data/strpair"
-	"gopkg.in/xmlpath.v2"
+	"gocloud.dev/blob"
 	"gopkg.in/yaml.v2"
 )
+
+// Storage manages content.
+type Storage interface {
+	CollyStorage() collyStorage.Storage
+	CookieJar() http.CookieJar
+
+	Close() error
+
+	PutData(ctx context.Context, path string, r io.Reader, opts *blob.WriterOptions) error
+	GetData(ctx context.Context, path string, opts *blob.ReaderOptions) (io.Reader, error)
+
+	PutTags(idHash string, tags []string) error
+	GetTags(idHash string) ([]string, error)
+
+	PutContent(ctx context.Context, r io.Reader) (idHash string, err error)
+	GetContent(idHash string) (io.Reader, error)
+
+	GetThumbnail(idHash string) (io.Reader, error)
+
+	// Find() ([]string, error)
+}
 
 //yaml.v2 https://play.golang.org/p/zt1Og9LIWNI
 //yaml.v3 https://play.golang.org/p/H9WhcWSfJHT
 
 const (
-	classesBlobKey = "classes.yaml"
-	parsersBlobKey = "parsers.yaml"
+	contentNamespace = "content"
+	classesBlobKey   = "classes.yaml"
+	parsersBlobKey   = "parsers.yaml"
 )
 
-var (
-	contentStore Storage
-	parsers      Parsers
-	classes      URLClassifiers
-
-	// Collector is a colly.Collector for fetching content.
-	Collector *colly.Collector
-)
-
-// IDHash returns a hashsum that will be used to identify the content.
-func IDHash(r io.Reader) (string, error) {
-	h := sha256.New()
-	io.Copy(h, r)
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
-}
-
-// HashToHexColor returns a value acceptable to use in specifying color.
-func HashToHexColor(idHash string) string {
-	i := big.NewInt(0)
-	if _, ok := i.SetString(idHash, 16); !ok {
-		return ""
-	}
-	return i.Mod(i, big.NewInt(0xffffff)).Text(16)
-}
-
-// Config holds configuration vlaues for eridanus.
+// Config holds configuration values for eridanus.
 type Config struct {
 	LocalStorePath string
+	Storage        Storage
+	Collector      *colly.Collector
+	InsertParsers  []*Parser
+	InsertClasses  []*URLClassifier
 }
 
-// Run starts the appropriate tasks for eridanus operations.
-func Run(ctx context.Context, cfg Config) error {
-	log := ctxlogrus.Extract(ctx)
+// Eridanus is an implementation of a content retrieval, storage, and
+// categorizational system inspired by Hydrus Network.
+type Eridanus struct {
+	storage   Storage
+	parsers   []*Parser
+	classes   []*URLClassifier
+	collector *colly.Collector
+}
 
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+// New returns a new instance.
+func New(ctx context.Context, cfg Config) (*Eridanus, error) {
+	e := new(Eridanus)
 
-	if cfg.LocalStorePath == "" {
-		return errors.New("LocalStorePath is not specified")
-	}
-
-	log = log.WithField("LocalStorePath", cfg.LocalStorePath)
-
-	localContentStore, err := NewStorage(filepath.Join(cfg.LocalStorePath, "content"))
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := localContentStore.Close(); err != nil {
-			log.Error(err)
+	e.storage = cfg.Storage
+	if e.storage == nil {
+		if cfg.LocalStorePath == "" {
+			return nil, errors.New("LocalStorePath is not specified")
 		}
-	}()
-	contentStore = localContentStore
+		storage, err := storage.NewStorage(ctx, cfg.LocalStorePath)
+		if err != nil {
+			return nil, err
+		}
+		e.storage = storage
+	}
 
-	cReader, err := contentStore.GetData(ctx, classesBlobKey, nil)
+	e.collector = cfg.Collector
+	if e.collector == nil {
+		e.collector = colly.NewCollector()
+		e.collector.Async = true
+		e.collector.CheckHead = true
+		e.collector.IgnoreRobotsTxt = true
+		e.collector.MaxBodySize = 8e+7 // 10MB
+		e.collector.SetStorage(e.storage.CollyStorage())
+		e.collector.WithTransport(&http.Transport{
+			MaxIdleConns:       3,
+			IdleConnTimeout:    30 * time.Second,
+			DisableCompression: true,
+		})
+		extensions.Referer(e.collector)
+	}
+
+	if err := e.loadClassesFromStorage(ctx); err != nil {
+		return nil, err
+	}
+	e.classes = append(e.classes, cfg.InsertClasses...)
+
+	if err := e.loadParsersFromStorage(ctx); err != nil {
+		return nil, err
+	}
+	e.parsers = append(e.parsers, cfg.InsertParsers...)
+
+	return e, nil
+}
+
+func (e *Eridanus) loadParsersFromStorage(ctx context.Context) error {
+	r, err := e.storage.GetData(ctx, parsersBlobKey, nil)
 	if err != nil {
-		if err != ErrBlobNotFound {
+		if err != storage.ErrBlobNotFound {
 			return err
 		}
-	} else if err := yaml.NewDecoder(cReader).Decode(&classes); err != nil {
+		e.parsers = defaultConfig.GetParsers()
+		return nil
+	}
+	return yaml.NewDecoder(r).Decode(&e.parsers)
+}
+
+func (e *Eridanus) saveParsersToStorage(ctx context.Context) error {
+	b, err := yaml.Marshal(e.parsers)
+	if err != nil {
 		return err
 	}
+	return e.storage.PutData(ctx, parsersBlobKey, bytes.NewReader(b), nil)
+}
 
-	pReader, err := contentStore.GetData(ctx, parsersBlobKey, nil)
+func (e *Eridanus) loadClassesFromStorage(ctx context.Context) error {
+	r, err := e.storage.GetData(ctx, classesBlobKey, nil)
 	if err != nil {
-		if err != ErrBlobNotFound {
+		if err != storage.ErrBlobNotFound {
 			return err
 		}
-	} else if err := yaml.NewDecoder(pReader).Decode(&parsers); err != nil {
+		e.classes = defaultConfig.GetClasses()
+		return nil
+	}
+	return yaml.NewDecoder(r).Decode(&e.classes)
+}
+
+func (e *Eridanus) saveClassesToStorage(ctx context.Context) error {
+	b, err := yaml.Marshal(e.classes)
+	if err != nil {
+		return err
+	}
+	return e.storage.PutData(ctx, classesBlobKey, bytes.NewReader(b), nil)
+}
+
+// Close closes open instances.
+func (e *Eridanus) Close() error {
+	ctx := context.Background()
+
+	if err := e.saveClassesToStorage(ctx); err != nil {
 		return err
 	}
 
-	Collector = colly.NewCollector()
-	Collector.Async = true
-	Collector.CheckHead = true
-	Collector.IgnoreRobotsTxt = true
-	Collector.MaxBodySize = 8e+7 // 10MB
-	// Collector.CacheDir = filepath.Join(cfg.LocalStorePath, "colly")
-	Collector.SetStorage(contentStore.AsCollyStorage())
-	Collector.WithTransport(&http.Transport{
-		MaxIdleConns:       3,
-		IdleConnTimeout:    30 * time.Second,
-		DisableCompression: true,
-	})
-	extensions.Referer(Collector)
-
-	for _, us := range []string{
-		// "https://pictures.hentai-foundry.com/f/Felox08/792226/Felox08-792226-Snowflake_-_Re_design.jpg",
-		"https://www.hentai-foundry.com/pictures/user/Felox08/792226/Snowflake---Re-design",
-		"https://www.hentai-foundry.com/pictures/user/Felox08/798105/Singularity",
-		// "https://www.hentai-foundry.com/pictures/user/Felox08",
-		// "https://www.hentai-foundry.com/user/Felox08/profile",
-	} {
-		u, err := url.Parse(us)
-		if err != nil {
-			log.Error(err)
-			continue
-		}
-		results, err := Get(ctx, u)
-		if err != nil {
-			log.Error(err)
-			continue
-		}
-		log.Debugf("%s\n%s", u.String(), strings.Join(results.Format(), "\n"))
-	}
-
-	cBytes, err := yaml.Marshal(classes)
-	if err != nil {
-		log.Error(err)
-	} else if err := contentStore.PutData(ctx, classesBlobKey, bytes.NewReader(cBytes), nil); err != nil {
+	if err := e.saveParsersToStorage(ctx); err != nil {
 		return err
 	}
 
-	pBytes, err := yaml.Marshal(parsers)
-	if err != nil {
-		log.Error(err)
-	} else if err := contentStore.PutData(ctx, parsersBlobKey, bytes.NewReader(pBytes), nil); err != nil {
+	if err := e.storage.Close(); err != nil {
 		return err
 	}
 
 	return nil
 }
 
+// Get retrieves a document from the internet.
+func (e *Eridanus) Get(ctx context.Context, u *url.URL) (strpair.Map, error) {
+	log := ctxlogrus.Extract(ctx)
+
+	if c, err := fetchChromeCookies(ctx, "", u); err != nil {
+		log.Error(err)
+	} else {
+		log.Infof("%d cookies imported for %s", len(c), u)
+		e.storage.CookieJar().SetCookies(u, c)
+	}
+
+	rc := resultsCollector{ctx: ctxlogrus.ToContext(ctx, log), e: e}
+	rc.Get(u)
+
+	return rc.result, nil
+}
+
 type resultsCollector struct {
 	ctx     context.Context
 	results []strpair.Map
 	result  strpair.Map
+	e       *Eridanus
 }
 
 func (rc *resultsCollector) Get(u *url.URL) error {
@@ -168,7 +206,7 @@ func (rc *resultsCollector) Get(u *url.URL) error {
 		rc.result = make(strpair.Map)
 	}
 
-	c := Collector.Clone()
+	c := rc.e.collector.Clone()
 	c.OnResponse(rc.onResponse)
 	c.Request("GET", u.String(), nil, nil, nil)
 	c.Wait()
@@ -180,37 +218,19 @@ func (rc *resultsCollector) onResponse(res *colly.Response) {
 	ru := res.Request.URL
 	log := ctxlogrus.Extract(rc.ctx).WithField("url", ru.String())
 
-	uc := FindClassifier(ru)
+	uc := ClassifierFor(rc.e.classes, ru)
 	if uc == nil {
 		log.Errorf("no classification for %s", ru)
 		return
 	}
 
-	u, err := uc.Normalize(ru)
+	u, err := ClassifierNormalize(uc, ru)
 	if err != nil {
 		log.Error(err)
 		return
 	}
 
-	ps := FindParsers(uc)
-	if ps == nil {
-		log.Errorf("no parsers for %s", u)
-		return
-	}
-
-	urlHash, err := IDHash(strings.NewReader(u.String()))
-	if err != nil {
-		log.Error(err)
-		return
-	}
-
-	if err := contentStore.PutData(rc.ctx,
-		"/webcache/"+urlHash,
-		bytes.NewReader(res.Body), nil); err != nil {
-		log.Error(err)
-	}
-
-	node, err := xmlpath.ParseHTML(bytes.NewReader(res.Body))
+	urlHash, err := idhash.IDHash(strings.NewReader(u.String()))
 	if err != nil {
 		log.Error(err)
 		return
@@ -218,32 +238,32 @@ func (rc *resultsCollector) onResponse(res *colly.Response) {
 
 	results := strpair.ParseMap(rc.result[urlHash])
 	results.Set("@", u.String())
-	for _, p := range ps {
-		if p.Value == "" {
-			continue
-		}
-		r, err := p.ParseHTML(node)
+
+	for _, p := range ParsersFor(rc.e.parsers, uc) {
+		data, err := Parse(p, []string{string(res.Body)})
 		if err != nil {
-			logrus.Warn(err)
-			continue
+			log.Error(err)
+			return
 		}
-		for k, vs := range r {
-			for _, v := range vs {
-				if k == Follow.String() || k == Content.String() {
-					v = res.Request.AbsoluteURL(v)
-				}
-				results.Add(k, v)
+
+		for i := range data {
+			switch p.GetType() {
+			case Parser_TAG:
+				results.Add("tag", data[i])
+			case Parser_CONTENT:
+				results.Add("content", res.Request.AbsoluteURL(data[i]))
+			case Parser_FOLLOW:
+				results.Add("follow", res.Request.AbsoluteURL(data[i]))
+			case Parser_SOURCE:
+				results.Add("source", data[i])
+			case Parser_MD5SUM:
+				results.Add("md5sum", data[i])
 			}
 		}
 	}
+	log.Infof("%s: %v", u, results)
 
-	for _, link := range results[Content.String()] {
-		if err := res.Request.Visit(link); err != nil {
-			log.WithField("url", link).Error(err)
-		}
-	}
-
-	for _, link := range results[Follow.String()] {
+	for _, link := range results["follow"] {
 		if err := res.Request.Visit(link); err != nil {
 			log.WithField("url", link).Error(err)
 		}
@@ -257,15 +277,4 @@ func (rc *resultsCollector) onResponse(res *colly.Response) {
 		rc.result.Add(urlHash, pair)
 	}
 	rc.results = append(rc.results, results)
-}
-
-// Get retrieves a document from the internet.
-func Get(ctx context.Context, u *url.URL) (strpair.Map, error) {
-	log := ctxlogrus.Extract(ctx)
-	rc := resultsCollector{
-		ctx: ctxlogrus.ToContext(ctx, log),
-	}
-	rc.Get(u)
-
-	return rc.result, nil
 }

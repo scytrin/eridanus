@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package com.github.scytrin.eridanus;
+
+option go_package = "github.com/scytrin/eridanus";
+
+message PBConfig {
+  string local_data = 1;
+  repeated Parser parsers = 2;
+  repeated URLClassifier classes = 3;
+}
+
+enum MatcherType {
+  EXACT = 0;
+  REGEX = 1;
+}
+
+message StringMatcher {
+  string value = 1;
+  MatcherType type = 2;
+  string default = 3;
+}
+
+message ParamMatcher {
+  string value = 1;
+  MatcherType type = 2;
+  string default = 3;
+  string key = 4;
+}
+
+message URLClassifier {
+  enum URLClass {
+    FILE = 0;
+    POST = 1;
+    LIST = 2;
+    WATCH = 3;
+  }
+
+  string name = 1;
+  URLClass class = 2;
+  uint64 priority = 3;
+  string domain = 4;
+  repeated StringMatcher path = 5;
+  repeated ParamMatcher query = 6;
+  bool allow_http = 7;
+  bool match_subdomain = 9; // if true, matches subdomains
+  bool allow_subdomain = 8; // if true, won't alter hostname in normalization
+}
+
+message Parser {
+  enum ResultType {
+    TAG = 0;
+    CONTENT = 1;
+    FOLLOW = 2;
+    SOURCE = 3;
+    MD5SUM = 4;
+  }
+
+  message Operation {
+    enum OpType {
+      XPATH = 0;
+      REGEX = 1;
+      PREFIX = 2;
+      SUFFIX = 3;
+    }
+
+    string value = 1;
+    OpType type = 2;
+  }
+
+  string name = 1;
+  ResultType type = 2;
+  repeated Operation operations = 4;
+  repeated string urls = 3;
+}
+
+

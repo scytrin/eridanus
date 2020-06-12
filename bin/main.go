@@ -1,6 +1,5 @@
 // Binary eridanus runs eridanus.
 
-//BREAK go:generate rsrc -manifest main.manifest -o rsrc.syso
 package main
 
 import (
@@ -8,7 +7,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"sort"
+	"strings"
 
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
 	"github.com/nullseed/logruseq"
@@ -35,7 +36,33 @@ func main() {
 	log := logrus.StandardLogger()
 	ctx := ctxlogrus.ToContext(context.Background(), logrus.NewEntry(log))
 
-	if err := eridanus.Run(ctx, cfg); err != nil {
+	e, err := eridanus.New(ctx, cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, us := range []string{
+		// "https://pictures.hentai-foundry.com/f/Felox08/792226/Felox08-792226-Snowflake_-_Re_design.jpg",
+		"https://www.hentai-foundry.com/pictures/user/Felox08/792226/Snowflake---Re-design",
+		"https://www.hentai-foundry.com/pictures/user/Felox08/798105/Singularity",
+		// "https://www.hentai-foundry.com/pictures/user/Felox08",
+		// "https://www.hentai-foundry.com/user/Felox08/profile",
+	} {
+		u, err := url.Parse(us)
+		if err != nil {
+			log.Error(err)
+			continue
+		}
+
+		results, err := e.Get(ctx, u)
+		if err != nil {
+			log.Error(err)
+			continue
+		}
+		log.Debugf("%s\n%s", u.String(), strings.Join(results.Format(), "\n"))
+	}
+
+	if err := e.Close(); err != nil {
 		log.Fatal(err)
 	}
 
@@ -48,15 +75,12 @@ type EFormatter struct{ logrus.TextFormatter }
 // Format formats a logrus.Entry instance.
 func (f *EFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	buf := bytes.NewBuffer(nil)
-	fmt.Fprintf(buf, "%s %s -- %s\n",
+	fmt.Fprintf(buf, "[%s] %s:%d -- %s\n",
 		entry.Time.Format("2006-01-02 15:04:05.00"),
-		entry.Level.String(),
-		entry.Message,
-	)
-	if entry.Caller != nil {
-		fmt.Fprintf(buf, "  logCall = %s:%d\n",
-			entry.Caller.File, entry.Caller.Line)
-	}
+		entry.Caller.File,
+		entry.Caller.Line,
+		entry.Level)
+
 	var keys []string
 	for k := range entry.Data {
 		keys = append(keys, k)
@@ -65,5 +89,7 @@ func (f *EFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	for _, k := range keys {
 		fmt.Fprintf(buf, "  %s = %v\n", k, entry.Data[k])
 	}
+
+	fmt.Fprintln(buf, entry.Message)
 	return buf.Bytes(), nil
 }
