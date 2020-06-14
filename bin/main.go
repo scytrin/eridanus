@@ -17,16 +17,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var (
-	persistDirDefault = `Z:\EridanusStore`
-	cfg               = eridanus.Config{}
-)
-
-func init() {
-	flag.StringVar(&cfg.LocalStorePath, "persist", persistDirDefault, "")
-}
-
 func main() {
+	persistPath := flag.String("persist", `Z:\EridanusStore`, "")
 	flag.Parse()
 
 	// logrus.SetLevel(logrus.DebugLevel)
@@ -36,11 +28,22 @@ func main() {
 	log := logrus.StandardLogger()
 	ctx := ctxlogrus.ToContext(context.Background(), logrus.NewEntry(log))
 
-	e, err := eridanus.New(ctx, cfg)
+	e, err := eridanus.New(ctx, *persistPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	test(ctx, e)
+
+	if err := e.Close(); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Info("DONE!!!!!")
+}
+
+func test(ctx context.Context, e *eridanus.Eridanus) {
+	log := ctxlogrus.Extract(ctx)
 	for _, us := range []string{
 		// "https://pictures.hentai-foundry.com/f/Felox08/792226/Felox08-792226-Snowflake_-_Re_design.jpg",
 		"https://www.hentai-foundry.com/pictures/user/Felox08/792226/Snowflake---Re-design",
@@ -53,20 +56,13 @@ func main() {
 			log.Error(err)
 			continue
 		}
-
-		results, err := e.Get(ctx, u)
+		r, err := e.Get(ctx, u)
 		if err != nil {
 			log.Error(err)
 			continue
 		}
-		log.Debugf("%s\n%s", u.String(), strings.Join(results.Format(), "\n"))
+		log.Debugf("%s\n%s", u, strings.Join(r.Format(), "\n"))
 	}
-
-	if err := e.Close(); err != nil {
-		log.Fatal(err)
-	}
-
-	log.Info("DONE!!!!!")
 }
 
 // EFormatter is an implementation of a logrus.Formatter for use with eridanus.

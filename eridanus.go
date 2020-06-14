@@ -2,12 +2,9 @@
 // categorizational system inspired by Hydrus Network.
 package eridanus
 
-//go:generate protoc --go_out=paths=source_relative:. eridanus.proto
-
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -20,8 +17,10 @@ import (
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
 	"github.com/scytrin/eridanus/idhash"
 	"github.com/scytrin/eridanus/storage"
+	"github.com/scytrin/eridanus/storage/importers"
 	"go.chromium.org/luci/common/data/strpair"
 	"gocloud.dev/blob"
+	"golang.org/x/xerrors"
 	"gopkg.in/yaml.v2"
 )
 
@@ -55,13 +54,24 @@ const (
 	parsersBlobKey   = "parsers.yaml"
 )
 
-// Config holds configuration values for eridanus.
-type Config struct {
-	LocalStorePath string
-	Storage        Storage
-	Collector      *colly.Collector
-	InsertParsers  []*Parser
-	InsertClasses  []*URLClassifier
+// NewCollector returns a new colly.Collector instance.
+func NewCollector(ctx context.Context, storage Storage) (*colly.Collector, error) {
+	if storage == nil {
+		return nil, xerrors.New("Storage not available")
+	}
+	c := colly.NewCollector()
+	c.Async = true
+	c.CheckHead = true
+	c.IgnoreRobotsTxt = true
+	c.MaxBodySize = 8e+7 // 10MB
+	c.SetStorage(storage.CollyStorage())
+	c.WithTransport(&http.Transport{
+		MaxIdleConns:       3,
+		IdleConnTimeout:    30 * time.Second,
+		DisableCompression: true,
+	})
+	extensions.Referer(c)
+	return c, nil
 }
 
 // Eridanus is an implementation of a content retrieval, storage, and
@@ -74,88 +84,30 @@ type Eridanus struct {
 }
 
 // New returns a new instance.
-func New(ctx context.Context, cfg Config) (*Eridanus, error) {
-	e := new(Eridanus)
-
-	e.storage = cfg.Storage
-	if e.storage == nil {
-		if cfg.LocalStorePath == "" {
-			return nil, errors.New("LocalStorePath is not specified")
-		}
-		storage, err := storage.NewStorage(ctx, cfg.LocalStorePath)
-		if err != nil {
-			return nil, err
-		}
-		e.storage = storage
+func New(ctx context.Context, path string) (*Eridanus, error) {
+	s, err := storage.NewStorage(ctx, path)
+	if err != nil {
+		return nil, err
 	}
 
-	e.collector = cfg.Collector
-	if e.collector == nil {
-		e.collector = colly.NewCollector()
-		e.collector.Async = true
-		e.collector.CheckHead = true
-		e.collector.IgnoreRobotsTxt = true
-		e.collector.MaxBodySize = 8e+7 // 10MB
-		e.collector.SetStorage(e.storage.CollyStorage())
-		e.collector.WithTransport(&http.Transport{
-			MaxIdleConns:       3,
-			IdleConnTimeout:    30 * time.Second,
-			DisableCompression: true,
-		})
-		extensions.Referer(e.collector)
+	c, err := NewCollector(ctx, s)
+	if err != nil {
+		return nil, err
 	}
+
+	e := &Eridanus{storage: s, collector: c}
+
+	ctxlogrus.Extract(ctx).Infof("%#v", e)
 
 	if err := e.loadClassesFromStorage(ctx); err != nil {
 		return nil, err
 	}
-	e.classes = append(e.classes, cfg.InsertClasses...)
 
 	if err := e.loadParsersFromStorage(ctx); err != nil {
 		return nil, err
 	}
-	e.parsers = append(e.parsers, cfg.InsertParsers...)
 
 	return e, nil
-}
-
-func (e *Eridanus) loadParsersFromStorage(ctx context.Context) error {
-	r, err := e.storage.GetData(ctx, parsersBlobKey, nil)
-	if err != nil {
-		if err != storage.ErrBlobNotFound {
-			return err
-		}
-		e.parsers = defaultConfig.GetParsers()
-		return nil
-	}
-	return yaml.NewDecoder(r).Decode(&e.parsers)
-}
-
-func (e *Eridanus) saveParsersToStorage(ctx context.Context) error {
-	b, err := yaml.Marshal(e.parsers)
-	if err != nil {
-		return err
-	}
-	return e.storage.PutData(ctx, parsersBlobKey, bytes.NewReader(b), nil)
-}
-
-func (e *Eridanus) loadClassesFromStorage(ctx context.Context) error {
-	r, err := e.storage.GetData(ctx, classesBlobKey, nil)
-	if err != nil {
-		if err != storage.ErrBlobNotFound {
-			return err
-		}
-		e.classes = defaultConfig.GetClasses()
-		return nil
-	}
-	return yaml.NewDecoder(r).Decode(&e.classes)
-}
-
-func (e *Eridanus) saveClassesToStorage(ctx context.Context) error {
-	b, err := yaml.Marshal(e.classes)
-	if err != nil {
-		return err
-	}
-	return e.storage.PutData(ctx, classesBlobKey, bytes.NewReader(b), nil)
 }
 
 // Close closes open instances.
@@ -181,7 +133,7 @@ func (e *Eridanus) Close() error {
 func (e *Eridanus) Get(ctx context.Context, u *url.URL) (strpair.Map, error) {
 	log := ctxlogrus.Extract(ctx)
 
-	if c, err := fetchChromeCookies(ctx, "", u); err != nil {
+	if c, err := importers.FetchChromeCookies(ctx, "", u); err != nil {
 		log.Error(err)
 	} else {
 		log.Infof("%d cookies imported for %s", len(c), u)
@@ -192,6 +144,46 @@ func (e *Eridanus) Get(ctx context.Context, u *url.URL) (strpair.Map, error) {
 	rc.Get(u)
 
 	return rc.result, nil
+}
+
+func (e *Eridanus) loadParsersFromStorage(ctx context.Context) error {
+	r, err := e.storage.GetData(ctx, parsersBlobKey, nil)
+	if err != nil {
+		if err != storage.ErrBlobNotFound {
+			return err
+		}
+		e.parsers = defaultConfig.GetParsers()
+		return nil
+	}
+	return yaml.NewDecoder(r).Decode(&e.parsers)
+}
+
+func (e *Eridanus) loadClassesFromStorage(ctx context.Context) error {
+	r, err := e.storage.GetData(ctx, classesBlobKey, nil)
+	if err != nil {
+		if err != storage.ErrBlobNotFound {
+			return err
+		}
+		e.classes = defaultConfig.GetClasses()
+		return nil
+	}
+	return yaml.NewDecoder(r).Decode(&e.classes)
+}
+
+func (e *Eridanus) saveParsersToStorage(ctx context.Context) error {
+	b, err := yaml.Marshal(e.parsers)
+	if err != nil {
+		return err
+	}
+	return e.storage.PutData(ctx, parsersBlobKey, bytes.NewReader(b), nil)
+}
+
+func (e *Eridanus) saveClassesToStorage(ctx context.Context) error {
+	b, err := yaml.Marshal(e.classes)
+	if err != nil {
+		return err
+	}
+	return e.storage.PutData(ctx, classesBlobKey, bytes.NewReader(b), nil)
 }
 
 type resultsCollector struct {

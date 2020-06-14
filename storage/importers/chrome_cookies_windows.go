@@ -1,4 +1,4 @@
-package eridanus
+package importers
 
 import (
 	"bytes"
@@ -36,7 +36,7 @@ var (
 	v10Header   = []byte("v10")
 )
 
-func fetchChromeCookies(ctx context.Context, profileName string, u *url.URL) ([]*http.Cookie, error) {
+func FetchChromeCookies(ctx context.Context, profileName string, u *url.URL) ([]*http.Cookie, error) {
 	log := ctxlogrus.Extract(ctx)
 
 	curUser, err := user.Current()
@@ -70,9 +70,9 @@ func fetchChromeCookies(ctx context.Context, profileName string, u *url.URL) ([]
 
 	var cookies []*http.Cookie
 	for rows.Next() {
-		cookie, err := extractCookie(ctx, rows.Scan)
+		cookie, err := extractChromeCookie(ctx, rows.Scan)
 		if err != nil {
-			log.Errorf("extractCookie: %v", err)
+			log.Errorf("extractChromeCookie: %v", err)
 		}
 		cookies = append(cookies, cookie)
 	}
@@ -80,7 +80,7 @@ func fetchChromeCookies(ctx context.Context, profileName string, u *url.URL) ([]
 	return cookies, nil
 }
 
-func extractCookie(ctx context.Context, scanner func(...interface{}) error) (cookie *http.Cookie, err error) {
+func extractChromeCookie(ctx context.Context, scanner func(...interface{}) error) (cookie *http.Cookie, err error) {
 	log := ctxlogrus.Extract(ctx)
 
 	var enValue []byte

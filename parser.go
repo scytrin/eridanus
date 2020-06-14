@@ -19,7 +19,7 @@ func ParsersFor(ps []*Parser, c *URLClassifier) []*Parser {
 		for _, ru := range p.GetUrls() {
 			u, err := url.Parse(ru)
 			if err != nil {
-				logrus.Warn("unable to parse example url: %s", ru)
+				logrus.Warnf("unable to parse example url: %s", ru)
 				continue
 			}
 			if ClassifierMatch(c, u) {

@@ -3,13 +3,16 @@ package storage
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"image"
+	_ "image/gif"  // image decoding
+	_ "image/jpeg" // image decoding
 	"image/png"
+	_ "image/png" // image decoding
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"path"
 	"path/filepath"
@@ -26,7 +29,17 @@ import (
 	_ "gocloud.dev/blob/memblob"  // for memory buckets
 	"gocloud.dev/docstore"
 	_ "gocloud.dev/docstore/memdocstore" // for memory docs
-	"golang.org/x/sync/errgroup"
+	_ "golang.org/x/image/bmp"           // image decoding
+	_ "golang.org/x/image/ccitt"         // image decoding
+	_ "golang.org/x/image/riff"          // image decoding
+	_ "golang.org/x/image/tiff"          // image decoding
+	_ "golang.org/x/image/tiff/lzw"      // image decoding
+	_ "golang.org/x/image/vector"        // image decoding
+	_ "golang.org/x/image/vp8"           // image decoding
+	_ "golang.org/x/image/vp8l"          // image decoding
+	_ "golang.org/x/image/webp"          // image decoding
+	"golang.org/x/net/publicsuffix"
+	"golang.org/x/xerrors"
 	"gopkg.in/yaml.v2"
 )
 
@@ -38,7 +51,7 @@ const (
 
 var (
 	// ErrBlobNotFound is an identifiable error for "NotFound"
-	ErrBlobNotFound = errors.New("not found")
+	ErrBlobNotFound = xerrors.New("not found")
 )
 
 type storageItem struct {
@@ -48,11 +61,10 @@ type storageItem struct {
 
 // Storage provides a default implementation of eridanus.Storage.
 type Storage struct {
-	mux     *sync.RWMutex
-	onClose []io.Closer
+	mux *sync.RWMutex
 
 	rootPath     string
-	cookieJar    *cookieJar // http.CookieJar
+	cookieJar    http.CookieJar
 	collyVisited map[uint64]bool
 
 	bucket          *blob.Bucket
@@ -67,20 +79,19 @@ func NewStorage(ctx context.Context, rootPath string) (s *Storage, err error) {
 	s = &Storage{
 		mux:          new(sync.RWMutex),
 		rootPath:     rootPath,
-		cookieJar:    new(cookieJar),
 		collyVisited: make(map[uint64]bool),
 	}
 
-	if _, err := os.Stat(rootPath); err != nil {
+	if _, err := os.Stat(s.rootPath); err != nil {
 		if !os.IsNotExist(err) {
 			return nil, err
 		}
-		if err := os.MkdirAll(rootPath, 0755); err != nil {
+		if err := os.MkdirAll(s.rootPath, 0755); err != nil {
 			return nil, err
 		}
 	}
 
-	blobDir := "file:///" + filepath.ToSlash(rootPath)
+	blobDir := "file:///" + filepath.ToSlash(s.rootPath)
 
 	s.bucket, err = blob.OpenBucket(ctx, blobDir)
 	if err != nil {
@@ -107,22 +118,16 @@ func NewStorage(ctx context.Context, rootPath string) (s *Storage, err error) {
 		return nil, fmt.Errorf("could not open collection: %v", err)
 	}
 
+	s.cookieJar, err = NewCookieJar(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	if err != nil {
+		return nil, err
+	}
+
 	return s, nil
 }
 
-// CookieJar provides a storage consistent http.CookieJar.
-func (s *Storage) CookieJar() http.CookieJar {
-	return s.cookieJar
-}
-
-// Close persists data to disk, then closes documents and buckets.
-func (s *Storage) Close() error {
-	s.mux.Lock()
-	defer s.mux.Unlock()
-	ctx := context.Background()
-	var errg errgroup.Group
-
-	iter := s.documents.Query().Get(ctx)
+func (s *Storage) persistDocuments(ctx context.Context, q *docstore.Query) error {
+	iter := q.Get(ctx)
 	defer iter.Stop()
 	for {
 		var doc storageItem
@@ -132,37 +137,47 @@ func (s *Storage) Close() error {
 			}
 			return err
 		}
-		logrus.Info(doc)
-		out, err := yaml.Marshal(doc)
-		if err != nil {
+		out := bytes.NewBuffer(nil)
+		if err := yaml.NewEncoder(out).Encode(doc); err != nil {
 			return err
 		}
-		if err := s.metadataBucket.WriteAll(ctx, doc.IDHash, out, nil); err != nil {
+		if err := s.metadataBucket.WriteAll(ctx, doc.IDHash, out.Bytes(), nil); err != nil {
 			return err
 		}
 	}
-
-	errg.Go(s.documents.Close)
-
-	if err := errg.Wait(); err != nil {
-		return fmt.Errorf("0: %v", err)
-	}
-
-	errg.Go(s.thumbnailBucket.Close)
-	errg.Go(s.contentBucket.Close)
-	errg.Go(s.metadataBucket.Close)
-	errg.Go(s.bucket.Close)
-	for _, c := range s.onClose {
-		if c != nil {
-			errg.Go(c.Close)
-		}
-	}
-
-	if err := errg.Wait(); err != nil {
-		return fmt.Errorf("1: %v", err)
-	}
-
 	return nil
+}
+
+// Close persists data to disk, then closes documents and buckets.
+func (s *Storage) Close() error {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+	ctx := context.Background()
+
+	if err := s.persistDocuments(ctx, s.documents.Query()); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.documents.Close(); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.bucket.Close(); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.contentBucket.Close(); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.thumbnailBucket.Close(); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.metadataBucket.Close(); err != nil {
+		logrus.Error(err)
+	}
+	return nil
+}
+
+// CookieJar provides a storage consistent http.CookieJar.
+func (s *Storage) CookieJar() http.CookieJar {
+	return s.cookieJar
 }
 
 // PutData stores arbitrary data.
@@ -265,14 +280,17 @@ func recoveryHandler(f func(error)) {
 		return
 	}
 	logrus.Debug(r)
+
+	var err error
 	switch rerr := r.(type) {
 	case error:
-		f(rerr)
+		err = rerr
 	case string:
-		f(errors.New(rerr))
+		err = xerrors.New(rerr)
 	default:
-		f(fmt.Errorf("panicked: %v", rerr))
+		err = xerrors.Errorf("panicked: %v", rerr)
 	}
+	f(err)
 }
 
 func (s *Storage) generateThumbnail(ctx context.Context, idHash string) (err error) {
@@ -323,7 +341,7 @@ func (s *Storage) updateContentPHash(idHash string) (err error) {
 	}
 
 	if pHash.GetHash() == 0 {
-		return errors.New("no phash generated")
+		return xerrors.New("no phash generated")
 	}
 
 	tags = append(tags, fmt.Sprintf("phash:%s", pHash.ToString()))

@@ -1,11 +1,10 @@
 package eridanus
 
 //go:generate protoc --go_out=paths=source_relative:. eridanus.proto
-//BREAK go:generate rsrc -manifest main.manifest -o rsrc.syso
-//BREAK go:generate enumer -json -text -yaml -sql -type=ParserOutputType
-//BREAK go:generate enumer -json -text -yaml -sql -type=ParserOpType
-//BREAK go:generate enumer -json -text -yaml -sql -type=StringMatcherType
-//BREAK go:generate enumer -json -text -yaml -sql -type=URLClassifierType
+
+import (
+	_ "golang.org/x/net/xsrftoken" // XSSP
+)
 
 var defaultConfig = &PBConfig{
 	LocalData: "",
@@ -13,7 +12,7 @@ var defaultConfig = &PBConfig{
 		{Name: "hf consent",
 			Type: Parser_FOLLOW,
 			Operations: []*Parser_Operation{
-				{Value: "//a[@id='frontPage_link']/@href"},
+				{Value: `//a[@id='frontPage_link']/@href`},
 				{Type: Parser_Operation_SUFFIX, Value: "&size=728"},
 			},
 			Urls: []string{
