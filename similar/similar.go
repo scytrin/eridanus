@@ -1,215 +1,171 @@
 package similar
 
-// import (
-// 	"fmt"
-// 	"image"
-// 	"math"
-// 	"sort"
-// 	"strings"
-// 	"sync"
-// 	"time"
+import (
+	"fmt"
+	"image"
+	"io"
+	"math"
+	"strings"
+	"time"
 
-// 	"github.com/corona10/goimagehash"
-// 	log "github.com/sirupsen/logrus"
-// 	"gonum.org/v1/gonum/spatial/vptree"
-// 	"stadik.net/eridanus"
-// )
+	"github.com/corona10/goimagehash"
+	"github.com/scytrin/eridanus"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/xerrors"
+	"gonum.org/v1/gonum/spatial/vptree"
+)
 
-// var gslSimilar sync.RWMutex
+func buildHash(s eridanus.Storage, idHash string, generate bool) (vptree.Comparable, error) {
+	tags, err := s.GetTags(idHash)
+	if err != nil {
+		return nil, err
+	}
 
-// type goimagehasher func(image.Image) (*goimagehash.ImageHash, error)
+	pHash, err := extractPHashTag(tags)
+	if err != nil {
+		return nil, err
+	}
 
-// func GeneratePHashTag(img image.Image) ([]string, error) {
-// 	var tags []string
+	if pHash == nil {
+		if !generate {
+			return nil, xerrors.Errorf("no phash for %s, generation disallowed", idHash)
+		}
 
-// 	defer func() {
-// 		if err := recover(); err != nil {
-// 			log.Error(err)
-// 		}
-// 	}()
-// 	hsh, err := goimagehash.PerceptionHash(img)
-// 	if err != nil {
-// 		log.Error(err)
-// 	}
-// 	if hsh.GetHash() > 0 {
-// 		tags = append(tags, fmt.Sprintf("phash:%s", hsh.ToString()))
-// 	}
+		r, err := s.GetContent(idHash)
+		if err != nil {
+			return nil, err
+		}
 
-// 	return tags, nil
-// }
+		pHash, err = generatePHashTag(r)
+		if err != nil {
+			return nil, err
+		}
 
-// type Similar map[string]map[string]float64
+		tags = append(tags, fmt.Sprintf("phash:%s", pHash.ToString()))
+		if err := s.PutTags(idHash, tags); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
 
-// func New(m eridanus.TagDB, effort int, maxDist float64) (Similar, error) {
-// 	tree, err := buildVPTree(m, 1) // minimal effort
-// 	if err != nil {
-// 		return nil, err
-// 	}
+func buildHashes(s eridanus.Storage, idHashes []string, generate bool) ([]vptree.Comparable, error) {
+	hashStart := time.Now()
+	var hashes []vptree.Comparable
 
-// 	findStart := time.Now()
-// 	similar := make(Similar)
-// 	similar.AddAllSimilar(tree, maxDist)
-// 	log.Infof("%s -- %d tree => %d similar @ d=%f",
-// 		time.Now().Sub(findStart), tree.Len(), similar.Len(), maxDist)
+	for _, idHash := range idHashes {
+		compHash, err := buildHash(s, idHash, generate)
+		if err != nil {
+			logrus.Error(err)
+			continue
+		}
+		hashes = append(hashes, compHash)
+	}
 
-// 	return similar, nil
-// }
+	logrus.Infof("%s -- %d items -> %d hashes",
+		time.Now().Sub(hashStart), len(idHashes), len(hashes))
+	return hashes, nil
+}
 
-// func (m Similar) Len() int {
-// 	gslSimilar.RLock()
-// 	defer gslSimilar.RUnlock()
+func buildVPTree(hashes []vptree.Comparable, effort int) (*vptree.Tree, error) {
+	treeStart := time.Now()
+	tree, err := vptree.New(hashes, effort, nil)
+	if err != nil {
+		return nil, err
+	}
+	logrus.Infof("%s -- %d hashes -> %d tree",
+		time.Now().Sub(treeStart), len(hashes), tree.Len())
+	return tree, nil
+}
 
-// 	return len(m)
-// }
+func extractPHashTag(tags []string) (*goimagehash.ImageHash, error) {
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, "phash:") {
+			pHash, err := goimagehash.ImageHashFromString(strings.TrimPrefix(tag, "phash:"))
+			if err != nil {
+				return nil, err
+			}
+			if pHash.GetKind() != goimagehash.PHash {
+				return nil, xerrors.Errorf("phash type mismatch: %s", pHash.GetKind())
+			}
+			return pHash, nil
+		}
+	}
+	return nil, xerrors.New("no phash tag found")
+}
 
-// func (m Similar) Distance(lh, rh string) float64 {
-// 	if lh == rh {
-// 		return 0
-// 	}
-// 	return m[lh][rh]
-// }
+func generatePHashTag(r io.Reader) (i *goimagehash.ImageHash, err error) {
+	defer eridanus.RecoveryHandler(func(e error) { err = e })
 
-// func (m Similar) ByQuantity() []string {
-// 	var keys []string
-// 	for k := range m {
-// 		keys = append(keys, k)
-// 	}
-// 	sort.Strings(keys)
-// 	sort.SliceStable(keys, func(i, j int) bool {
-// 		return len(m[keys[i]]) > len(m[keys[j]])
-// 	})
-// 	return keys
-// }
+	img, _, err := image.Decode(r)
+	if err != nil {
+		return nil, err
+	}
 
-// func (m Similar) ByDistance(idHash string) []string {
-// 	var keys []string
-// 	for rh := range m[idHash] {
-// 		keys = append(keys, rh)
-// 	}
-// 	sort.Strings(keys)
-// 	sort.SliceStable(keys, func(i, j int) bool {
-// 		return m[idHash][keys[i]] < m[idHash][keys[j]]
-// 	})
-// 	return keys
-// }
+	pHash, err := goimagehash.PerceptionHash(img)
+	if err != nil {
+		return nil, err
+	}
 
-// func (m Similar) Add(lh, rh string, d float64) error {
-// 	if lh == rh {
-// 		return nil
-// 	}
+	if pHash.GetHash() == 0 {
+		return nil, xerrors.New("phash generation failed")
+	}
 
-// 	gslSimilar.Lock()
-// 	defer gslSimilar.Unlock()
+	return pHash, nil
+}
 
-// 	for _, h1 := range []string{lh, rh} {
-// 		if _, ok := m[h1]; !ok {
-// 			m[h1] = make(map[string]float64)
-// 		}
-// 	}
-// 	m[lh][rh] = d
-// 	m[rh][lh] = d
-// 	return nil
-// }
+type cph struct {
+	Hash      string
+	ImageHash *goimagehash.ImageHash
+}
 
-// func (m Similar) AddSimilar(tree *vptree.Tree, maxDist float64, q vptree.Comparable) error {
-// 	qh := q.(*cph).Hash
-// 	d := vptree.NewDistKeeper(maxDist)
-// 	tree.NearestSet(d, q)
-// 	for rr := d.Pop(); d.Len() > 0; rr = d.Pop() {
-// 		rd := rr.(vptree.ComparableDist)
-// 		rh := rd.Comparable.(*cph).Hash
-// 		if qh != rh {
-// 			m.Add(qh, rh, rd.Dist)
-// 		}
-// 	}
-// 	return nil
-// }
+// Distance satisfies vptree.Comparable.Distance.
+func (h *cph) Distance(ov vptree.Comparable) float64 {
+	if o, ok := ov.(*cph); ok {
+		if h.Hash == o.Hash || h.ImageHash == o.ImageHash {
+			return 0
+		}
+		if d, err := h.ImageHash.Distance(o.ImageHash); err != nil {
+			logrus.Error(err)
+		} else {
+			return float64(d)
+		}
+	}
+	return math.MaxFloat64
+}
 
-// func (m Similar) AddAllSimilar(tree *vptree.Tree, maxDist float64) error {
-// 	var wg sync.WaitGroup
-// 	tree.Do(func(q vptree.Comparable, _ int) bool {
-// 		wg.Add(1)
-// 		go func() {
-// 			defer wg.Done()
-// 			if err := m.AddSimilar(tree, maxDist, q); err != nil {
-// 				log.Error(err)
-// 			}
-// 		}()
-// 		return false
-// 	})
-// 	wg.Wait()
-// 	return nil
-// }
+func findSimilar(tree *vptree.Tree, target vptree.Comparable, maxDist float64) map[string]float64 {
+	similar := make(map[string]float64)
+	qh := target.(*cph).Hash
+	d := vptree.NewDistKeeper(maxDist)
+	tree.NearestSet(d, target)
+	for rr := d.Pop(); d.Len() > 0; rr = d.Pop() {
+		rd := rr.(vptree.ComparableDist)
+		rh := rd.Comparable.(*cph).Hash
+		if qh != rh {
+			similar[rh] = rd.Dist
+		}
+	}
+	return similar
+}
 
-// func buildVPTree(m eridanus.TagDB, effort int) (*vptree.Tree, error) {
-// 	hashes, err := buildHashes(m)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	treeStart := time.Now()
-// 	tree, err := vptree.New(hashes, effort, nil)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	log.Infof("%s -- %d hashes -> %d tree",
-// 		time.Now().Sub(treeStart), len(hashes), tree.Len())
-// 	return tree, nil
-// }
-
-// func buildHashes(m eridanus.TagDB) ([]vptree.Comparable, error) {
-// 	hashStart := time.Now()
-// 	var hashes []vptree.Comparable
-// 	if err := m.Range(func(idHash string, tags []string) error {
-// 		for _, tag := range tags {
-// 			if strings.HasPrefix(tag, "phash:") {
-// 				pHash, err := goimagehash.ImageHashFromString(
-// 					strings.TrimPrefix(tag, "phash:"))
-// 				if err != nil {
-// 					log.Error(err)
-// 					continue
-// 				}
-// 				if pHash.GetKind() != goimagehash.PHash {
-// 					continue
-// 				}
-// 				hashes = append(hashes, &cph{Hash: idHash, ImageHash: pHash})
-// 			}
-// 		}
-// 		return nil
-// 	}); err != nil {
-// 		return nil, err
-// 	}
-// 	log.Infof("%s -- %d items -> %d hashes",
-// 		time.Now().Sub(hashStart), m.Len(), len(hashes))
-// 	return hashes, nil
-// }
-
-// func findComparable(t *vptree.Tree, idHash string) vptree.Comparable {
-// 	var r vptree.Comparable
-// 	t.Do(func(q vptree.Comparable, _ int) bool {
-// 		if idHash == q.(*cph).Hash {
-// 			r = q
-// 			return true
-// 		}
-// 		return false
-// 	})
-// 	return r
-// }
-
-// type cph struct {
-// 	Hash      string
-// 	ImageHash *goimagehash.ImageHash
-// }
-
-// func (h *cph) Distance(ov vptree.Comparable) float64 {
-// 	if o, ok := ov.(*cph); ok {
-// 		if h.Hash == o.Hash || h.ImageHash == o.ImageHash {
-// 			return 0
-// 		}
-// 		if d, err := h.ImageHash.Distance(o.ImageHash); err != nil {
-// 			log.Error(err)
-// 		} else {
-// 			return float64(d)
-// 		}
-// 	}
-// 	return math.MaxFloat64
-// }
+// Find returns a map of idHash to perceptive distance from the specified target.
+func Find(s eridanus.Storage, targetIDHash string, effort int, maxDist float64, generate bool) (map[string]float64, error) {
+	target, err := buildHash(s, targetIDHash, generate)
+	if err != nil {
+		return nil, err
+	}
+	idHashes, err := s.ContentKeys()
+	if err != nil {
+		return nil, err
+	}
+	hashes, err := buildHashes(s, idHashes, generate)
+	if err != nil {
+		return nil, err
+	}
+	tree, err := buildVPTree(hashes, effort)
+	if err != nil {
+		return nil, err
+	}
+	return findSimilar(tree, target, maxDist), nil
+}

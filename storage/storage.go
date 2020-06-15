@@ -13,14 +13,15 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/corona10/goimagehash"
 	"github.com/nfnt/resize"
+	"github.com/scytrin/eridanus"
 	"github.com/scytrin/eridanus/idhash"
 	"github.com/sirupsen/logrus"
 	"go.chromium.org/luci/common/data/stringset"
@@ -39,19 +40,16 @@ import (
 	_ "golang.org/x/image/vp8l"          // image decoding
 	_ "golang.org/x/image/webp"          // image decoding
 	"golang.org/x/net/publicsuffix"
-	"golang.org/x/xerrors"
 	"gopkg.in/yaml.v2"
 )
+
+//yaml.v2 https://play.golang.org/p/zt1Og9LIWNI
+//yaml.v3 https://play.golang.org/p/H9WhcWSfJHT
 
 const (
 	cacheSize  = 1e6
 	queueLimit = 1e3
 	tmbX, tmbY = 150, 150
-)
-
-var (
-	// ErrBlobNotFound is an identifiable error for "NotFound"
-	ErrBlobNotFound = xerrors.New("not found")
 )
 
 type storageItem struct {
@@ -61,11 +59,9 @@ type storageItem struct {
 
 // Storage provides a default implementation of eridanus.Storage.
 type Storage struct {
-	mux *sync.RWMutex
-
-	rootPath     string
-	cookieJar    http.CookieJar
-	collyVisited map[uint64]bool
+	mux       *sync.RWMutex
+	rootPath  string
+	cookieJar http.CookieJar
 
 	bucket          *blob.Bucket
 	contentBucket   *blob.Bucket
@@ -77,9 +73,8 @@ type Storage struct {
 // NewStorage provides a new instance implementing Storage.
 func NewStorage(ctx context.Context, rootPath string) (s *Storage, err error) {
 	s = &Storage{
-		mux:          new(sync.RWMutex),
-		rootPath:     rootPath,
-		collyVisited: make(map[uint64]bool),
+		mux:      new(sync.RWMutex),
+		rootPath: rootPath,
 	}
 
 	if _, err := os.Stat(s.rootPath); err != nil {
@@ -175,9 +170,14 @@ func (s *Storage) Close() error {
 	return nil
 }
 
-// CookieJar provides a storage consistent http.CookieJar.
-func (s *Storage) CookieJar() http.CookieJar {
-	return s.cookieJar
+// Cookies implements the Cookies method of the http.CookieJar interface.
+func (s *Storage) Cookies(u *url.URL) []*http.Cookie {
+	return s.cookieJar.Cookies(u)
+}
+
+// SetCookies implements the SetCookies method of the http.CookieJar interface.
+func (s *Storage) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	s.cookieJar.SetCookies(u, cookies)
 }
 
 // PutData stores arbitrary data.
@@ -199,7 +199,7 @@ func (s *Storage) GetData(ctx context.Context, key string, opts *blob.ReaderOpti
 		return nil, err
 	}
 	if !has {
-		return nil, ErrBlobNotFound
+		return nil, eridanus.ErrItemNotFound
 	}
 	r, err := s.bucket.NewReader(ctx, key, opts)
 	if err != nil {
@@ -216,7 +216,7 @@ func (s *Storage) GetData(ctx context.Context, key string, opts *blob.ReaderOpti
 }
 
 // ContentKeys returns a list of all content item keys.
-func (s *Storage) ContentKeys() []string {
+func (s *Storage) ContentKeys() ([]string, error) {
 	ctx := context.Background()
 	var keys []string
 	var obj *blob.ListObject
@@ -231,7 +231,7 @@ func (s *Storage) ContentKeys() []string {
 		}
 		keys = append(keys, path.Base(obj.Key))
 	}
-	return keys
+	return keys, nil
 }
 
 // HasContent checks of the presence of content for the given hash.
@@ -267,34 +267,11 @@ func (s *Storage) PutContent(ctx context.Context, r io.Reader) (out string, err 
 		return "", err
 	}
 
-	if err := s.updateContentPHash(idHash); err != nil {
-		return "", err
-	}
-
 	return idHash, nil
 }
 
-func recoveryHandler(f func(error)) {
-	r := recover()
-	if r == nil {
-		return
-	}
-	logrus.Debug(r)
-
-	var err error
-	switch rerr := r.(type) {
-	case error:
-		err = rerr
-	case string:
-		err = xerrors.New(rerr)
-	default:
-		err = xerrors.Errorf("panicked: %v", rerr)
-	}
-	f(err)
-}
-
 func (s *Storage) generateThumbnail(ctx context.Context, idHash string) (err error) {
-	defer recoveryHandler(func(e error) { err = e })
+	defer eridanus.RecoveryHandler(func(e error) { err = e })
 
 	r, err := s.GetContent(idHash)
 	if err != nil {
@@ -315,37 +292,6 @@ func (s *Storage) generateThumbnail(ctx context.Context, idHash string) (err err
 		return err
 	}
 	return tw.Close()
-}
-
-func (s *Storage) updateContentPHash(idHash string) (err error) {
-	defer recoveryHandler(func(e error) { err = e })
-
-	tags, err := s.GetTags(idHash)
-	if err != nil {
-		return err
-	}
-
-	r, err := s.GetContent(idHash)
-	if err != nil {
-		return err
-	}
-
-	img, _, err := image.Decode(r)
-	if err != nil {
-		return err
-	}
-
-	pHash, err := goimagehash.PerceptionHash(img)
-	if err != nil {
-		return err
-	}
-
-	if pHash.GetHash() == 0 {
-		return xerrors.New("no phash generated")
-	}
-
-	tags = append(tags, fmt.Sprintf("phash:%s", pHash.ToString()))
-	return s.PutTags(idHash, tags)
 }
 
 // GetContent provides a reader of the content for the given hash.
@@ -401,7 +347,7 @@ func (s *Storage) defrostMetadata(ctx context.Context, idHash string) (*storageI
 		return nil, err
 	}
 	if !has {
-		return nil, ErrBlobNotFound
+		return nil, eridanus.ErrItemNotFound
 	}
 	r, err := s.metadataBucket.NewReader(ctx, idHash, nil)
 	if err != nil {
@@ -427,4 +373,9 @@ func (s *Storage) PutTags(idHash string, tags []string) error {
 		IDHash: idHash,
 		Tags:   tagSet.ToSortedSlice(),
 	})
+}
+
+// Find searches through tags for matches.
+func (s *Storage) Find() ([]string, error) {
+	return nil, nil
 }

@@ -1,20 +1,22 @@
-package storage
+package fetcher
 
 import (
 	"net/url"
 	"sync"
 
 	"github.com/gocolly/colly/v2/storage"
+	"github.com/scytrin/eridanus"
 )
 
 type collyStorage struct {
 	sync.RWMutex
-	*Storage
+	eridanus.Storage
+	visited map[uint64]bool
 }
 
 // CollyStorage returns an instance satisfying storage.Storage for gcolly.
-func (s *Storage) CollyStorage() storage.Storage {
-	return &collyStorage{Storage: s}
+func NewCollyStorage(s eridanus.Storage) storage.Storage {
+	return &collyStorage{Storage: s, visited: make(map[uint64]bool)}
 }
 
 // Init satisfies storage.Storage.Init and queue.Storage.Init.
@@ -26,7 +28,7 @@ func (s *collyStorage) Init() error {
 func (s *collyStorage) Visited(requestID uint64) error {
 	s.Lock()
 	defer s.Unlock()
-	s.collyVisited[requestID] = true
+	s.visited[requestID] = true
 	return nil
 }
 
@@ -34,19 +36,19 @@ func (s *collyStorage) Visited(requestID uint64) error {
 func (s *collyStorage) IsVisited(requestID uint64) (bool, error) {
 	s.RLock()
 	defer s.RUnlock()
-	return s.collyVisited[requestID], nil
+	return s.visited[requestID], nil
 }
 
 // Cookies satisfies storage.Storage.Cookies.
 func (s *collyStorage) Cookies(u *url.URL) string {
 	s.RLock()
 	defer s.RUnlock()
-	return storage.StringifyCookies(s.cookieJar.Cookies(u))
+	return storage.StringifyCookies(s.Storage.Cookies(u))
 }
 
 // SetCookies satisfies storage.Storage.SetCookies.
 func (s *collyStorage) SetCookies(u *url.URL, cookies string) {
 	s.Lock()
 	defer s.Unlock()
-	s.cookieJar.SetCookies(u, storage.UnstringifyCookies(cookies))
+	s.Storage.SetCookies(u, storage.UnstringifyCookies(cookies))
 }

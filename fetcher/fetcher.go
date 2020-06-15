@@ -1,282 +1,157 @@
 package fetcher
 
-// import (
-// 	"bytes"
-// 	"context"
-// 	"fmt"
-// 	"io/ioutil"
-// 	"net/http"
-// 	"net/http/cookiejar"
-// 	"net/url"
-// 	"path"
-// 	"strings"
-// 	"sync"
-// 	"time"
+import (
+	"context"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
 
-// 	"github.com/gocolly/colly/v2"
-// 	"github.com/gocolly/colly/v2/debug"
-// 	"github.com/gocolly/colly/v2/extensions"
-// 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
-// 	"github.com/kr/pretty"
-// 	"github.com/sirupsen/logrus"
-// 	"gopkg.in/xmlpath.v2"
-// 	"stadik.net/eridanus"
-// )
+	"github.com/gocolly/colly"
+	"github.com/gocolly/colly/extensions"
+	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
+	"github.com/scytrin/eridanus"
+	"github.com/scytrin/eridanus/idhash"
+	"github.com/scytrin/eridanus/storage/importers"
+	"go.chromium.org/luci/common/data/strpair"
+	"golang.org/x/xerrors"
+)
 
-// type key int
+// NewCollector returns a new colly.Collector instance.
+func NewCollector(ctx context.Context, s eridanus.Storage) (*colly.Collector, error) {
+	if s == nil {
+		return nil, xerrors.New("Storage not available")
+	}
+	c := colly.NewCollector()
+	c.Async = true
+	c.CheckHead = true
+	c.IgnoreRobotsTxt = true
+	c.MaxBodySize = 8e+7 // 10MB
+	if err := c.SetStorage(NewCollyStorage(s)); err != nil {
+		return nil, err
+	}
+	c.WithTransport(&http.Transport{
+		MaxIdleConns:       3,
+		IdleConnTimeout:    30 * time.Second,
+		DisableCompression: true,
+	})
+	extensions.Referer(c)
+	return c, nil
+}
 
-// const (
-// 	fetchKey key = iota
-// 	breadcrumbsKey
-// )
+// Fetcher fetches content from the internet.
+type Fetcher struct {
+	collector *colly.Collector
+	e         *eridanus.Eridanus
+}
 
-// type FetchResult []string // tags and metadata
+func NewFetcher(ctx context.Context, e *eridanus.Eridanus) (*Fetcher, error) {
+	c, err := NewCollector(ctx, e.GetStorage())
+	if err != nil {
+		return nil, err
+	}
 
-// func (fr FetchResult) ByPrefix(prefix string) []string {
-// 	prefix = prefix + ":"
-// 	var values []string
-// 	for _, e := range fr {
-// 		if strings.HasPrefix(e, prefix) {
-// 			values = append(values, strings.TrimPrefix(e, prefix))
-// 		}
-// 	}
-// 	return values
-// }
+	return &Fetcher{collector: c, e: e}, nil
+}
 
-// type Fetcher struct {
-// 	PoolSize int
-// 	CacheDir string
-// 	Config   []*Config `yaml:",omitempty"`
-// }
+// Get retrieves a document from the internet.
+func (f *Fetcher) Get(ctx context.Context, u *url.URL) (strpair.Map, error) {
+	log := ctxlogrus.Extract(ctx)
 
-// func (f *Fetcher) buildCollector(id uint32) *colly.Collector {
-// 	o := []colly.CollectorOption{
-// 		// colly.AllowURLRevisit(),
-// 		// colly.Async(true),
-// 		colly.Debugger(new(debug.LogDebugger)),
-// 		colly.IgnoreRobotsTxt(),
-// 		colly.MaxBodySize(8e+7), // 10MB
-// 		colly.MaxDepth(3),
-// 		// colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.122 Safari/537.36"),
-// 	}
-// 	if id > 0 {
-// 		o = append(o, colly.ID(id))
-// 	}
-// 	// if f.CacheDir != "" {
-// 	// 	o = append(o, colly.CacheDir(f.CacheDir))
-// 	// }
-// 	c := colly.NewCollector(o...)
-// 	c.SetRequestTimeout(10 * time.Second)
-// 	c.Limit(&colly.LimitRule{
-// 		DomainGlob:  "*",
-// 		Parallelism: 1,
-// 		Delay:       1 * time.Second,
-// 		RandomDelay: 5 * time.Second,
-// 	})
-// 	extensions.Referer(c)
-// 	return c
-// }
+	if c, err := importers.FetchChromeCookies(ctx, "", u); err != nil {
+		log.Error(err)
+	} else {
+		log.Infof("%d cookies imported for %s", len(c), u)
+		f.e.GetStorage().SetCookies(u, c)
+	}
 
-// func (f *Fetcher) I() eridanus.Fetcher {
-// 	return f
-// }
+	rc := resultsCollector{ctx: ctxlogrus.ToContext(ctx, log), f: f}
+	rc.Get(u)
 
-// func (f *Fetcher) MarshalYAML() (interface{}, error) {
-// 	return f, nil
-// }
+	return rc.result, nil
+}
 
-// func (f *Fetcher) UnmarshalYAML(unm func(interface{}) error) error {
-// 	type alias Fetcher
-// 	if err := unm((*alias)(f)); err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }
+type resultsCollector struct {
+	ctx     context.Context
+	results []strpair.Map
+	result  strpair.Map
+	f       *Fetcher
+}
 
-// func (f *Fetcher) Fetch(ctx context.Context, s string) (eridanus.FetchResult, error) {
-// 	c := f.buildCollector(0)
-// 	fr := newFetch(ctx, c)
-// 	for _, fc := range f.Config {
-// 		for _, m := range fc.Matchers {
-// 			m.Install(c, fc, fr)
-// 		}
-// 	}
-// 	if err := c.Visit(s); err != nil {
-// 		return nil, err
-// 	}
-// 	c.Wait()
-// 	return FetchResult(fr.GetAll("added")), nil
-// }
+func (rc *resultsCollector) Get(u *url.URL) error {
+	if rc.result == nil {
+		rc.result = make(strpair.Map)
+	}
 
-// func (f *Fetcher) rawFetch(ctx context.Context, s string) (eridanus.FetchResult, error) {
-// 	log := ctxlogrus.Extract(ctx)
-// 	fr := newFetch(ctx, nil)
-// 	jar, _ := cookiejar.New(nil)
-// 	c := &http.Client{Jar: jar}
+	c := rc.f.collector.Clone()
+	c.OnResponse(rc.onResponse)
+	c.Request("GET", u.String(), nil, nil, nil)
+	c.Wait()
 
-// 	res, err := c.Get(s)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	defer res.Body.Close()
+	return nil
+}
 
-// 	resBody, err := ioutil.ReadAll(res.Body)
-// 	if err != nil {
-// 		return nil, err
-// 	}
+func (rc *resultsCollector) onResponse(res *colly.Response) {
+	ru := res.Request.URL
+	log := ctxlogrus.Extract(rc.ctx).WithField("url", ru.String())
 
-// 	if !strings.Contains(res.Header.Get("Content-Type"), "text/html") {
-// 		idHash, err := fr.srv.Ingest(context.Background(), bytes.NewReader(resBody),
-// 			fmt.Sprint("source:upload"),
-// 			fmt.Sprintf("filename:%s", path.Base(s)),
-// 		)
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		fr.Add(s, "added", idHash)
-// 	} else {
-// 		u, err := url.Parse(s)
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		node, err := xmlpath.ParseHTML(bytes.NewReader(resBody))
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		for _, config := range f.Config {
-// 			if !config.Match(u) {
-// 				continue
-// 			}
-// 			for _, matcher := range config.Matchers {
-// 				if !matcher.Match(u) {
-// 					continue
-// 				}
-// 				for iter := xmlpath.MustCompile(matcher.Selector).Iter(node); iter.Next(); {
-// 					log.Info(iter.Node().String())
-// 				}
-// 			}
-// 		}
-// 	}
-// 	return FetchResult(fr.GetAll("added")), nil
-// }
+	uc := eridanus.ClassifierFor(rc.f.e.GetClassifiers(), ru)
+	if uc == nil {
+		log.Errorf("no classification for %s", ru)
+		return
+	}
 
-// type fetch struct {
-// 	c          *colly.Collector
-// 	srv        eridanus.ServerI
-// 	log        logrus.FieldLogger
-// 	valuesLock *sync.Mutex
-// 	values     map[string]map[string][]string
-// }
+	u, err := eridanus.ClassifierNormalize(uc, ru)
+	if err != nil {
+		log.Error(err)
+		return
+	}
 
-// func newFetch(ctx context.Context, c *colly.Collector) *fetch {
-// 	fr := &fetch{
-// 		c:          c,
-// 		srv:        eridanus.FromContext(ctx),
-// 		log:        ctxlogrus.Extract(ctx),
-// 		valuesLock: new(sync.Mutex),
-// 		values:     make(map[string]map[string][]string),
-// 	}
-// 	c.OnRequest(fr.onRequest)
-// 	c.OnResponse(fr.onResponse)
-// 	c.OnScraped(fr.onScraped)
-// 	c.OnError(fr.onError)
-// 	return fr
-// }
+	urlHash, err := idhash.IDHash(strings.NewReader(u.String()))
+	if err != nil {
+		log.Error(err)
+		return
+	}
 
-// func (f *fetch) Add(u, k, v string) {
-// 	f.valuesLock.Lock()
-// 	defer f.valuesLock.Unlock()
-// 	if _, ok := f.values[u]; ok {
-// 		f.values[u][k] = append(f.values[u][k], v)
-// 		return
-// 	}
-// 	f.values[u] = map[string][]string{k: {v}}
-// }
+	results := strpair.ParseMap(rc.result[urlHash])
+	results.Set("@", u.String())
 
-// func (f *fetch) GetKeys(u string) []string {
-// 	f.valuesLock.Lock()
-// 	defer f.valuesLock.Unlock()
-// 	var ret []string
-// 	for k := range f.values[u] {
-// 		ret = append(ret, k)
-// 	}
-// 	return ret
-// }
+	for _, p := range eridanus.ParsersFor(rc.f.e.GetParsers(), uc) {
+		data, err := eridanus.Parse(p, []string{string(res.Body)})
+		if err != nil {
+			log.Error(err)
+			return
+		}
 
-// func (f *fetch) GetAll(k string) []string {
-// 	f.valuesLock.Lock()
-// 	defer f.valuesLock.Unlock()
-// 	var ret []string
-// 	for _, values := range f.values {
-// 		ret = append(ret, values[k]...)
-// 	}
-// 	return ret
-// }
+		for i := range data {
+			switch p.GetType() {
+			case eridanus.Parser_TAG:
+				results.Add("tag", data[i])
+			case eridanus.Parser_CONTENT:
+				results.Add("content", res.Request.AbsoluteURL(data[i]))
+			case eridanus.Parser_FOLLOW:
+				results.Add("follow", res.Request.AbsoluteURL(data[i]))
+			case eridanus.Parser_SOURCE:
+				results.Add("source", data[i])
+			case eridanus.Parser_MD5SUM:
+				results.Add("md5sum", data[i])
+			}
+		}
+	}
+	log.Infof("%s: %v", u, results)
 
-// func (f *fetch) Get(u, k string) []string {
-// 	f.valuesLock.Lock()
-// 	defer f.valuesLock.Unlock()
-// 	return f.values[u][k]
-// }
+	for _, link := range results["follow"] {
+		if err := res.Request.Visit(link); err != nil {
+			log.WithField("url", link).Error(err)
+		}
+	}
 
-// func (f *fetch) onRequest(req *colly.Request) {
-// 	log := f.log.WithField("url", req.URL.String())
-// 	log.Debugf("%# v", pretty.Formatter(req.Ctx))
-// 	log.Debugf("%# v", pretty.Formatter(req.Headers))
-// }
-
-// func (f *fetch) onResponse(res *colly.Response) {
-// 	log := f.log.WithField("url", res.Request.URL.String())
-// 	log.Debugf("%# v\n%s", pretty.Formatter(res.Headers), string(res.Body))
-
-// 	if strings.Contains(res.Headers.Get("Content-Type"), "text/html") {
-// 		return
-// 	}
-
-// 	if f.srv == nil {
-// 		log.Error("server not found, unable to retain content")
-// 		return
-// 	}
-
-// 	log.Infof("%# v", pretty.Formatter(f.values))
-// 	log.Infof("%# v", pretty.Formatter(res.Ctx))
-
-// 	idHash, err := f.srv.Ingest(context.Background(), bytes.NewReader(res.Body),
-// 		fmt.Sprint("source:upload"),
-// 		fmt.Sprintf("filename:%s", res.FileName()),
-// 	)
-// 	if err != nil {
-// 		log.Error(err)
-// 		return
-// 	}
-
-// 	f.Add(res.Request.URL.String(), "added", idHash)
-// 	log.Infof("%# v", pretty.Formatter(f.values[res.Request.URL.String()]))
-// }
-
-// func (f *fetch) onScraped(res *colly.Response) {
-// 	url := res.Request.URL.String()
-// 	log := f.log.WithField("url", url)
-
-// 	log.Infof("%# v", pretty.Formatter(res.Ctx))
-// 	log.Infof("%# v", pretty.Formatter(f.values[url]))
-
-// 	if !strings.Contains(res.Headers.Get("Content-Type"), "text/html") {
-// 		return
-// 	}
-
-// 	for kind, values := range f.values[url] {
-// 		for _, value := range values {
-// 			switch kind {
-// 			case "image", "follow", "consent":
-// 				res.Request.Visit(value)
-// 			}
-// 		}
-// 	}
-// }
-
-// func (f *fetch) onError(res *colly.Response, err error) {
-// 	log := f.log.WithField("url", res.Request.URL.String())
-
-// 	log.Error(err)
-// }
+	if _, ok := rc.result[urlHash]; ok {
+		log.Infof("deleting %v", rc.result[urlHash])
+		rc.result.Del(urlHash)
+	}
+	for _, pair := range results.Format() {
+		rc.result.Add(urlHash, pair)
+	}
+	rc.results = append(rc.results, results)
+}

@@ -14,6 +14,8 @@ import (
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
 	"github.com/nullseed/logruseq"
 	"github.com/scytrin/eridanus"
+	"github.com/scytrin/eridanus/fetcher"
+	"github.com/scytrin/eridanus/storage"
 	"github.com/sirupsen/logrus"
 )
 
@@ -28,12 +30,22 @@ func main() {
 	log := logrus.StandardLogger()
 	ctx := ctxlogrus.ToContext(context.Background(), logrus.NewEntry(log))
 
-	e, err := eridanus.New(ctx, *persistPath)
+	s, err := storage.NewStorage(ctx, *persistPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	test(ctx, e)
+	e, err := eridanus.New(ctx, s)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	f, err := fetcher.NewFetcher(ctx, e)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	test(ctx, e, f)
 
 	if err := e.Close(); err != nil {
 		log.Fatal(err)
@@ -42,7 +54,7 @@ func main() {
 	log.Info("DONE!!!!!")
 }
 
-func test(ctx context.Context, e *eridanus.Eridanus) {
+func test(ctx context.Context, e *eridanus.Eridanus, f *fetcher.Fetcher) {
 	log := ctxlogrus.Extract(ctx)
 	for _, us := range []string{
 		// "https://pictures.hentai-foundry.com/f/Felox08/792226/Felox08-792226-Snowflake_-_Re_design.jpg",
@@ -56,7 +68,7 @@ func test(ctx context.Context, e *eridanus.Eridanus) {
 			log.Error(err)
 			continue
 		}
-		r, err := e.Get(ctx, u)
+		r, err := f.Get(ctx, u)
 		if err != nil {
 			log.Error(err)
 			continue
