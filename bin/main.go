@@ -35,26 +35,25 @@ func main() {
 		log.Fatal(err)
 	}
 
-	e, err := eridanus.New(ctx, s)
+	f, err := fetcher.NewFetcher(ctx, s)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	f, err := fetcher.NewFetcher(ctx, e)
-	if err != nil {
+	test(ctx, s, f)
+
+	if err := f.Close(); err != nil {
 		log.Fatal(err)
 	}
 
-	test(ctx, e, f)
-
-	if err := e.Close(); err != nil {
+	if err := s.Close(); err != nil {
 		log.Fatal(err)
 	}
 
 	log.Info("DONE!!!!!")
 }
 
-func test(ctx context.Context, e *eridanus.Eridanus, f *fetcher.Fetcher) {
+func test(ctx context.Context, s eridanus.Storage, f *fetcher.Fetcher) {
 	log := ctxlogrus.Extract(ctx)
 	for _, us := range []string{
 		// "https://pictures.hentai-foundry.com/f/Felox08/792226/Felox08-792226-Snowflake_-_Re_design.jpg",

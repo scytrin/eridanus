@@ -14,7 +14,7 @@ type collyStorage struct {
 	visited map[uint64]bool
 }
 
-// CollyStorage returns an instance satisfying storage.Storage for gcolly.
+// NewCollyStorage returns an instance satisfying storage.Storage for gcolly.
 func NewCollyStorage(s eridanus.Storage) storage.Storage {
 	return &collyStorage{Storage: s, visited: make(map[uint64]bool)}
 }

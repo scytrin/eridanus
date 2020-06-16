@@ -40,6 +40,7 @@ import (
 	_ "golang.org/x/image/vp8l"          // image decoding
 	_ "golang.org/x/image/webp"          // image decoding
 	"golang.org/x/net/publicsuffix"
+	"golang.org/x/xerrors"
 	"gopkg.in/yaml.v2"
 )
 
@@ -47,9 +48,12 @@ import (
 //yaml.v3 https://play.golang.org/p/H9WhcWSfJHT
 
 const (
-	cacheSize  = 1e6
-	queueLimit = 1e3
-	tmbX, tmbY = 150, 150
+	cacheSize        = 1e6
+	queueLimit       = 1e3
+	tmbX, tmbY       = 150, 150
+	contentNamespace = "content"
+	classesBlobKey   = "classes.yaml"
+	parsersBlobKey   = "parsers.yaml"
 )
 
 type storageItem struct {
@@ -59,15 +63,19 @@ type storageItem struct {
 
 // Storage provides a default implementation of eridanus.Storage.
 type Storage struct {
-	mux       *sync.RWMutex
-	rootPath  string
 	cookieJar http.CookieJar
+
+	mux      *sync.RWMutex
+	rootPath string
 
 	bucket          *blob.Bucket
 	contentBucket   *blob.Bucket
 	thumbnailBucket *blob.Bucket
 	metadataBucket  *blob.Bucket
 	documents       *docstore.Collection
+
+	parsers []*eridanus.Parser
+	classes []*eridanus.URLClassifier
 }
 
 // NewStorage provides a new instance implementing Storage.
@@ -93,6 +101,14 @@ func NewStorage(ctx context.Context, rootPath string) (s *Storage, err error) {
 		return nil, fmt.Errorf("could not open bucket: %v", err)
 	}
 
+	if err := s.loadClassesFromStorage(ctx); err != nil {
+		return nil, err
+	}
+
+	if err := s.loadParsersFromStorage(ctx); err != nil {
+		return nil, err
+	}
+
 	s.contentBucket, err = blob.OpenBucket(ctx, blobDir+"?prefix=/content/")
 	if err != nil {
 		return nil, fmt.Errorf("could not open bucket: %v", err)
@@ -113,12 +129,86 @@ func NewStorage(ctx context.Context, rootPath string) (s *Storage, err error) {
 		return nil, fmt.Errorf("could not open collection: %v", err)
 	}
 
-	s.cookieJar, err = NewCookieJar(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	jarOpts := &cookiejar.Options{PublicSuffixList: publicsuffix.List}
+	s.cookieJar, err = NewCookieJar(jarOpts)
 	if err != nil {
 		return nil, err
 	}
 
 	return s, nil
+}
+
+func (s *Storage) loadParsersFromStorage(ctx context.Context) error {
+	r, err := s.GetData(ctx, parsersBlobKey, nil)
+	if err != nil {
+		if err != eridanus.ErrItemNotFound {
+			return err
+		}
+		s.parsers = eridanus.DefaultConfig().GetParsers() // only if none existing
+		return nil
+	}
+	return yaml.NewDecoder(r).Decode(&s.parsers)
+}
+
+func (s *Storage) loadClassesFromStorage(ctx context.Context) error {
+	r, err := s.GetData(ctx, classesBlobKey, nil)
+	if err != nil {
+		if err != eridanus.ErrItemNotFound {
+			return err
+		}
+		s.classes = eridanus.DefaultConfig().GetClasses() // only if none existing
+		return nil
+	}
+	return yaml.NewDecoder(r).Decode(&s.classes)
+}
+
+// Close persists data to disk, then closes documents and buckets.
+func (s *Storage) Close() error {
+	s.mux.Lock()
+	defer s.mux.Unlock()
+	ctx := context.Background()
+
+	if err := s.saveClassesToStorage(ctx); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.saveParsersToStorage(ctx); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.persistDocuments(ctx, s.documents.Query()); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.documents.Close(); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.bucket.Close(); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.contentBucket.Close(); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.thumbnailBucket.Close(); err != nil {
+		logrus.Error(err)
+	}
+	if err := s.metadataBucket.Close(); err != nil {
+		logrus.Error(err)
+	}
+	return nil
+}
+
+func (s *Storage) saveParsersToStorage(ctx context.Context) error {
+	b, err := yaml.Marshal(s.parsers)
+	if err != nil {
+		return err
+	}
+	return s.PutData(ctx, parsersBlobKey, bytes.NewReader(b), nil)
+}
+
+func (s *Storage) saveClassesToStorage(ctx context.Context) error {
+	b, err := yaml.Marshal(s.classes)
+	if err != nil {
+		return err
+	}
+	return s.PutData(ctx, classesBlobKey, bytes.NewReader(b), nil)
 }
 
 func (s *Storage) persistDocuments(ctx context.Context, q *docstore.Query) error {
@@ -139,33 +229,6 @@ func (s *Storage) persistDocuments(ctx context.Context, q *docstore.Query) error
 		if err := s.metadataBucket.WriteAll(ctx, doc.IDHash, out.Bytes(), nil); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// Close persists data to disk, then closes documents and buckets.
-func (s *Storage) Close() error {
-	s.mux.Lock()
-	defer s.mux.Unlock()
-	ctx := context.Background()
-
-	if err := s.persistDocuments(ctx, s.documents.Query()); err != nil {
-		logrus.Error(err)
-	}
-	if err := s.documents.Close(); err != nil {
-		logrus.Error(err)
-	}
-	if err := s.bucket.Close(); err != nil {
-		logrus.Error(err)
-	}
-	if err := s.contentBucket.Close(); err != nil {
-		logrus.Error(err)
-	}
-	if err := s.thumbnailBucket.Close(); err != nil {
-		logrus.Error(err)
-	}
-	if err := s.metadataBucket.Close(); err != nil {
-		logrus.Error(err)
 	}
 	return nil
 }
@@ -213,6 +276,58 @@ func (s *Storage) GetData(ctx context.Context, key string, opts *blob.ReaderOpti
 		return nil, err
 	}
 	return bytes.NewReader(data), nil
+}
+
+// GetAllParsers returns all current parsers.
+func (s *Storage) GetAllParsers(ctx context.Context) []*eridanus.Parser {
+	return s.parsers
+}
+
+// AddParser adds a parser.
+func (s *Storage) AddParser(ctx context.Context, p *eridanus.Parser) error {
+	s.parsers = append(s.parsers, p)
+	return nil
+}
+
+// GetParserByName returns the named parser.
+func (s *Storage) GetParserByName(ctx context.Context, name string) (*eridanus.Parser, error) {
+	for _, p := range s.parsers {
+		if p.Name == name {
+			return p, nil
+		}
+	}
+	return nil, xerrors.Errorf("no parser named %s", name)
+}
+
+// FindParsers returns a list of parsers applicable to the provided URLCLassifier.
+func (s *Storage) FindParsers(ctx context.Context, c *eridanus.URLClassifier) ([]*eridanus.Parser, error) {
+	return nil, xerrors.New("not yet implemented")
+}
+
+// GetAllClassifiers returns all current classifiers.
+func (s *Storage) GetAllClassifiers(ctx context.Context) []*eridanus.URLClassifier {
+	return s.classes
+}
+
+// AddClassifier adds a classifier.
+func (s *Storage) AddClassifier(ctx context.Context, c *eridanus.URLClassifier) error {
+	s.classes = append(s.classes, c)
+	return nil
+}
+
+// GetClassifierByName returns the named classifier.
+func (s *Storage) GetClassifierByName(ctx context.Context, name string) (*eridanus.URLClassifier, error) {
+	for _, c := range s.classes {
+		if c.Name == name {
+			return c, nil
+		}
+	}
+	return nil, xerrors.Errorf("no classifier named %s", name)
+}
+
+// FindClassifier returns a list of parsers applicable to the provided URL.
+func (s *Storage) FindClassifier(ctx context.Context, u *url.URL) (*eridanus.URLClassifier, error) {
+	return nil, xerrors.New("not yet implemented")
 }
 
 // ContentKeys returns a list of all content item keys.

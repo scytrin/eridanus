@@ -42,16 +42,22 @@ func NewCollector(ctx context.Context, s eridanus.Storage) (*colly.Collector, er
 // Fetcher fetches content from the internet.
 type Fetcher struct {
 	collector *colly.Collector
-	e         *eridanus.Eridanus
+	s         eridanus.Storage
 }
 
-func NewFetcher(ctx context.Context, e *eridanus.Eridanus) (*Fetcher, error) {
-	c, err := NewCollector(ctx, e.GetStorage())
+// NewFetcher retrns a new fetcher instance.
+func NewFetcher(ctx context.Context, s eridanus.Storage) (*Fetcher, error) {
+	c, err := NewCollector(ctx, s)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Fetcher{collector: c, e: e}, nil
+	return &Fetcher{collector: c, s: s}, nil
+}
+
+// Close shuts down the fetcher instance.
+func (f *Fetcher) Close() error {
+	return nil
 }
 
 // Get retrieves a document from the internet.
@@ -62,7 +68,7 @@ func (f *Fetcher) Get(ctx context.Context, u *url.URL) (strpair.Map, error) {
 		log.Error(err)
 	} else {
 		log.Infof("%d cookies imported for %s", len(c), u)
-		f.e.GetStorage().SetCookies(u, c)
+		f.s.SetCookies(u, c)
 	}
 
 	rc := resultsCollector{ctx: ctxlogrus.ToContext(ctx, log), f: f}
@@ -95,7 +101,8 @@ func (rc *resultsCollector) onResponse(res *colly.Response) {
 	ru := res.Request.URL
 	log := ctxlogrus.Extract(rc.ctx).WithField("url", ru.String())
 
-	uc := eridanus.ClassifierFor(rc.f.e.GetClassifiers(), ru)
+	classes := rc.f.s.GetAllClassifiers(rc.ctx)
+	uc := eridanus.ClassifierFor(classes, ru)
 	if uc == nil {
 		log.Errorf("no classification for %s", ru)
 		return
@@ -116,7 +123,8 @@ func (rc *resultsCollector) onResponse(res *colly.Response) {
 	results := strpair.ParseMap(rc.result[urlHash])
 	results.Set("@", u.String())
 
-	for _, p := range eridanus.ParsersFor(rc.f.e.GetParsers(), uc) {
+	parsers := rc.f.s.GetAllParsers(rc.ctx)
+	for _, p := range eridanus.ParsersFor(parsers, uc) {
 		data, err := eridanus.Parse(p, []string{string(res.Body)})
 		if err != nil {
 			log.Error(err)

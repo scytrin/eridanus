@@ -30,10 +30,10 @@ message ParamMatcher {
 
 message URLClassifier {
   enum URLClass {
-    FILE = 0;
-    POST = 1;
-    LIST = 2;
-    WATCH = 3;
+    FILE = 0; // Treated as a CONTENT result would be.
+    POST = 1; // Only act on TAG and CONTENT results.
+    LIST = 2; // Only act on FOLLOW results.
+    WATCH = 3; // Only act on FOLLOW results, ignoring previously found ones.
   }
 
   string name = 1;
