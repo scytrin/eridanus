@@ -12,9 +12,6 @@ import (
 	"sync"
 	"time"
 
-	_ "gocloud.dev/blob/fileblob"        // for local buckets
-	_ "gocloud.dev/blob/memblob"         // for memory buckets
-	_ "gocloud.dev/docstore/memdocstore" // for memory docs
 	"golang.org/x/net/idna"
 )
 

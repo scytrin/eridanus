@@ -4,12 +4,6 @@ package com.github.scytrin.eridanus;
 
 option go_package = "github.com/scytrin/eridanus";
 
-message PBConfig {
-  string local_data = 1;
-  repeated Parser parsers = 2;
-  repeated URLClassifier classes = 3;
-}
-
 enum MatcherType {
   EXACT = 0;
   REGEX = 1;
@@ -22,46 +16,47 @@ message StringMatcher {
 }
 
 message ParamMatcher {
-  string value = 1;
-  MatcherType type = 2;
-  string default = 3;
-  string key = 4;
+  string key = 1;
+  StringMatcher string_matcher = 2;
 }
 
-message URLClassifier {
-  enum URLClass {
+message URLClass {
+  enum Class {
     FILE = 0; // Treated as a CONTENT result would be.
     POST = 1; // Only act on TAG and CONTENT results.
     LIST = 2; // Only act on FOLLOW results.
-    WATCH = 3; // Only act on FOLLOW results, ignoring previously found ones.
+    IGNORE = 15;
   }
 
   string name = 1;
-  URLClass class = 2;
+  Class class = 2;
   uint64 priority = 3;
   string domain = 4;
   repeated StringMatcher path = 5;
-  repeated ParamMatcher query = 6;
+  map<string,StringMatcher> query = 6;
+  // repeated ParamMatcher query = 6;
   bool allow_http = 7;
   bool match_subdomain = 9; // if true, matches subdomains
   bool allow_subdomain = 8; // if true, won't alter hostname in normalization
 }
 
-message Parser {
-  enum ResultType {
-    TAG = 0;
-    CONTENT = 1;
-    FOLLOW = 2;
-    SOURCE = 3;
-    MD5SUM = 4;
-  }
+enum ParseResultType {
+  TAG = 0;
+  CONTENT = 1;
+  FOLLOW = 2;
+  SOURCE = 3;
+  MD5SUM = 4;
+  NEXT = 5;
+}
 
+message Parser {
   message Operation {
     enum OpType {
-      XPATH = 0;
-      REGEX = 1;
-      PREFIX = 2;
-      SUFFIX = 3;
+      VALUE = 0;
+      XPATH = 1; // https://devhints.io/xpath
+      REGEX = 2;
+      PREFIX = 3;
+      SUFFIX = 4;
     }
 
     string value = 1;
@@ -69,9 +64,19 @@ message Parser {
   }
 
   string name = 1;
-  ResultType type = 2;
+  ParseResultType type = 2;
   repeated Operation operations = 4;
   repeated string urls = 3;
+
 }
 
+message ParseResult {
+  ParseResultType type = 1;
+  repeated string value = 2;
+  string parser = 3;
+  string uclass = 4;
+}
 
+message ParseResults {
+  repeated ParseResult results = 1;
+}

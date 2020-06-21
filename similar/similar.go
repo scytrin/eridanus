@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/corona10/goimagehash"
+	"github.com/pkg/errors"
 	"github.com/scytrin/eridanus"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/xerrors"
 	"gonum.org/v1/gonum/spatial/vptree"
 )
 
@@ -28,7 +28,7 @@ func buildHash(s eridanus.Storage, idHash string, generate bool) (vptree.Compara
 
 	if pHash == nil {
 		if !generate {
-			return nil, xerrors.Errorf("no phash for %s, generation disallowed", idHash)
+			return nil, errors.Errorf("no phash for %s, generation disallowed", idHash)
 		}
 
 		r, err := s.GetContent(idHash)
@@ -86,12 +86,12 @@ func extractPHashTag(tags []string) (*goimagehash.ImageHash, error) {
 				return nil, err
 			}
 			if pHash.GetKind() != goimagehash.PHash {
-				return nil, xerrors.Errorf("phash type mismatch: %s", pHash.GetKind())
+				return nil, errors.Errorf("phash type mismatch: %s", pHash.GetKind())
 			}
 			return pHash, nil
 		}
 	}
-	return nil, xerrors.New("no phash tag found")
+	return nil, errors.New("no phash tag found")
 }
 
 func generatePHashTag(r io.Reader) (i *goimagehash.ImageHash, err error) {
@@ -108,7 +108,7 @@ func generatePHashTag(r io.Reader) (i *goimagehash.ImageHash, err error) {
 	}
 
 	if pHash.GetHash() == 0 {
-		return nil, xerrors.New("phash generation failed")
+		return nil, errors.New("phash generation failed")
 	}
 
 	return pHash, nil

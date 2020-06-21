@@ -36,6 +36,7 @@ var (
 	v10Header   = []byte("v10")
 )
 
+// FetchChromeCookies fetches Cookies for the provided URL, all cookies if the URL is nil.
 func FetchChromeCookies(ctx context.Context, profileName string, u *url.URL) ([]*http.Cookie, error) {
 	log := ctxlogrus.Extract(ctx)
 

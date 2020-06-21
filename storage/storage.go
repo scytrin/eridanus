@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"image"
 	_ "image/gif"  // image decoding
@@ -15,32 +14,26 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/nfnt/resize"
+	"github.com/peterbourgon/diskv/v3"
+	"github.com/pkg/errors"
 	"github.com/scytrin/eridanus"
 	"github.com/scytrin/eridanus/idhash"
 	"github.com/sirupsen/logrus"
-	"go.chromium.org/luci/common/data/stringset"
-	"gocloud.dev/blob"
-	_ "gocloud.dev/blob/fileblob" // for local buckets
-	_ "gocloud.dev/blob/memblob"  // for memory buckets
-	"gocloud.dev/docstore"
-	_ "gocloud.dev/docstore/memdocstore" // for memory docs
-	_ "golang.org/x/image/bmp"           // image decoding
-	_ "golang.org/x/image/ccitt"         // image decoding
-	_ "golang.org/x/image/riff"          // image decoding
-	_ "golang.org/x/image/tiff"          // image decoding
-	_ "golang.org/x/image/tiff/lzw"      // image decoding
-	_ "golang.org/x/image/vector"        // image decoding
-	_ "golang.org/x/image/vp8"           // image decoding
-	_ "golang.org/x/image/vp8l"          // image decoding
-	_ "golang.org/x/image/webp"          // image decoding
+	_ "golang.org/x/image/bmp"      // image decoding
+	_ "golang.org/x/image/ccitt"    // image decoding
+	_ "golang.org/x/image/riff"     // image decoding
+	_ "golang.org/x/image/tiff"     // image decoding
+	_ "golang.org/x/image/tiff/lzw" // image decoding
+	_ "golang.org/x/image/vector"   // image decoding
+	_ "golang.org/x/image/vp8"      // image decoding
+	_ "golang.org/x/image/vp8l"     // image decoding
+	_ "golang.org/x/image/webp"     // image decoding
 	"golang.org/x/net/publicsuffix"
-	"golang.org/x/xerrors"
 	"gopkg.in/yaml.v2"
 )
 
@@ -48,12 +41,15 @@ import (
 //yaml.v3 https://play.golang.org/p/H9WhcWSfJHT
 
 const (
-	cacheSize        = 1e6
-	queueLimit       = 1e3
-	tmbX, tmbY       = 150, 150
-	contentNamespace = "content"
-	classesBlobKey   = "classes.yaml"
-	parsersBlobKey   = "parsers.yaml"
+	cacheSize          = 1e6
+	queueLimit         = 1e3
+	tmbX, tmbY         = 150, 150
+	contentNamespace   = "content"
+	thumbnailNamespace = "thumbnail"
+	metadataNamespace  = "metadata"
+	cookiesBlobKey     = "config/cookies.json"
+	classesBlobKey     = "config/classes.yaml"
+	parsersBlobKey     = "config/parsers.yaml"
 )
 
 type storageItem struct {
@@ -63,23 +59,19 @@ type storageItem struct {
 
 // Storage provides a default implementation of eridanus.Storage.
 type Storage struct {
-	cookieJar http.CookieJar
-
 	mux      *sync.RWMutex
 	rootPath string
+	backend  eridanus.StorageBackend
 
-	bucket          *blob.Bucket
-	contentBucket   *blob.Bucket
-	thumbnailBucket *blob.Bucket
-	metadataBucket  *blob.Bucket
-	documents       *docstore.Collection
+	kvStore *diskv.Diskv
 
 	parsers []*eridanus.Parser
-	classes []*eridanus.URLClassifier
+	classes []*eridanus.URLClass
+	cookies *Jar // http.CookieJar
 }
 
 // NewStorage provides a new instance implementing Storage.
-func NewStorage(ctx context.Context, rootPath string) (s *Storage, err error) {
+func NewStorage(rootPath string) (s *Storage, err error) {
 	s = &Storage{
 		mux:      new(sync.RWMutex),
 		rootPath: rootPath,
@@ -94,276 +86,264 @@ func NewStorage(ctx context.Context, rootPath string) (s *Storage, err error) {
 		}
 	}
 
-	blobDir := "file:///" + filepath.ToSlash(s.rootPath)
-
-	s.bucket, err = blob.OpenBucket(ctx, blobDir)
-	if err != nil {
-		return nil, fmt.Errorf("could not open bucket: %v", err)
-	}
-
-	if err := s.loadClassesFromStorage(ctx); err != nil {
-		return nil, err
-	}
-
-	if err := s.loadParsersFromStorage(ctx); err != nil {
-		return nil, err
-	}
-
-	s.contentBucket, err = blob.OpenBucket(ctx, blobDir+"?prefix=/content/")
-	if err != nil {
-		return nil, fmt.Errorf("could not open bucket: %v", err)
-	}
-
-	s.thumbnailBucket, err = blob.OpenBucket(ctx, blobDir+"?prefix=/thumbnail/")
-	if err != nil {
-		return nil, fmt.Errorf("could not open bucket: %v", err)
-	}
-
-	s.metadataBucket, err = blob.OpenBucket(ctx, blobDir+"?prefix=/metadata/")
-	if err != nil {
-		return nil, fmt.Errorf("could not open bucket: %v", err)
-	}
-
-	s.documents, err = docstore.OpenCollection(ctx, "mem://collection/idHash")
-	if err != nil {
-		return nil, fmt.Errorf("could not open collection: %v", err)
-	}
-
 	jarOpts := &cookiejar.Options{PublicSuffixList: publicsuffix.List}
-	s.cookieJar, err = NewCookieJar(jarOpts)
+	s.cookies, err = NewCookieJar(jarOpts)
 	if err != nil {
+		return nil, err
+	}
+
+	s.kvStore = diskv.New(diskv.Options{
+		BasePath:     filepath.Join(s.rootPath, "kv"),
+		CacheSizeMax: 8e+7,
+		PathPerm:     0755,
+		FilePerm:     0644,
+		AdvancedTransform: func(s string) *diskv.PathKey {
+			path := strings.Split(s, string(filepath.Separator))
+			last := len(path) - 1
+			return &diskv.PathKey{Path: path[:last], FileName: path[last]}
+		},
+		InverseTransform: func(pk *diskv.PathKey) string {
+			return filepath.Join(append(pk.Path, pk.FileName)...)
+		},
+	})
+
+	if err := s.loadCookiesFromStorage(); err != nil {
+		return nil, err
+	}
+
+	if err := s.loadClassesFromStorage(); err != nil {
+		return nil, err
+	}
+
+	if err := s.loadParsersFromStorage(); err != nil {
 		return nil, err
 	}
 
 	return s, nil
 }
 
-func (s *Storage) loadParsersFromStorage(ctx context.Context) error {
-	r, err := s.GetData(ctx, parsersBlobKey, nil)
-	if err != nil {
-		if err != eridanus.ErrItemNotFound {
-			return err
-		}
-		s.parsers = eridanus.DefaultConfig().GetParsers() // only if none existing
-		return nil
-	}
-	return yaml.NewDecoder(r).Decode(&s.parsers)
-}
-
-func (s *Storage) loadClassesFromStorage(ctx context.Context) error {
-	r, err := s.GetData(ctx, classesBlobKey, nil)
-	if err != nil {
-		if err != eridanus.ErrItemNotFound {
-			return err
-		}
-		s.classes = eridanus.DefaultConfig().GetClasses() // only if none existing
-		return nil
-	}
-	return yaml.NewDecoder(r).Decode(&s.classes)
+// GetRootPath returns the filepath location of on disk storage.
+func (s *Storage) GetRootPath() string {
+	return s.rootPath
 }
 
 // Close persists data to disk, then closes documents and buckets.
 func (s *Storage) Close() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
-	ctx := context.Background()
 
-	if err := s.saveClassesToStorage(ctx); err != nil {
+	if err := s.saveCookiesToStorage(); err != nil {
 		logrus.Error(err)
 	}
-	if err := s.saveParsersToStorage(ctx); err != nil {
+	if err := s.saveClassesToStorage(); err != nil {
 		logrus.Error(err)
 	}
-	if err := s.persistDocuments(ctx, s.documents.Query()); err != nil {
+	if err := s.saveParsersToStorage(); err != nil {
 		logrus.Error(err)
 	}
-	if err := s.documents.Close(); err != nil {
-		logrus.Error(err)
+
+	return nil
+}
+
+func (s *Storage) loadCookiesFromStorage() error {
+	rc, err := s.GetData(cookiesBlobKey)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	}
-	if err := s.bucket.Close(); err != nil {
-		logrus.Error(err)
-	}
-	if err := s.contentBucket.Close(); err != nil {
-		logrus.Error(err)
-	}
-	if err := s.thumbnailBucket.Close(); err != nil {
-		logrus.Error(err)
-	}
-	if err := s.metadataBucket.Close(); err != nil {
-		logrus.Error(err)
+	defer rc.Close()
+	if err := yaml.NewDecoder(rc).Decode(&s.cookies.entries); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (s *Storage) saveParsersToStorage(ctx context.Context) error {
+func (s *Storage) saveCookiesToStorage() error {
+	b, err := yaml.Marshal(s.cookies.entries)
+	if err != nil {
+		return err
+	}
+	return s.PutData(cookiesBlobKey, bytes.NewReader(b))
+}
+
+func (s *Storage) loadParsersFromStorage() error {
+	rc, err := s.GetData(parsersBlobKey)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	defer rc.Close()
+	if err := yaml.NewDecoder(rc).Decode(&s.parsers); err != nil {
+		return err
+	}
+	if err != nil || len(s.parsers) == 0 {
+		s.parsers = eridanus.DefaultParsers() // only if none existing
+	}
+	return nil
+}
+
+func (s *Storage) saveParsersToStorage() error {
 	b, err := yaml.Marshal(s.parsers)
 	if err != nil {
 		return err
 	}
-	return s.PutData(ctx, parsersBlobKey, bytes.NewReader(b), nil)
+	return s.PutData(parsersBlobKey, bytes.NewReader(b))
 }
 
-func (s *Storage) saveClassesToStorage(ctx context.Context) error {
-	b, err := yaml.Marshal(s.classes)
+func (s *Storage) loadClassesFromStorage() error {
+	rc, err := s.GetData(classesBlobKey)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	defer rc.Close()
+	if err := yaml.NewDecoder(rc).Decode(&s.classes); err != nil {
 		return err
 	}
-	return s.PutData(ctx, classesBlobKey, bytes.NewReader(b), nil)
-}
-
-func (s *Storage) persistDocuments(ctx context.Context, q *docstore.Query) error {
-	iter := q.Get(ctx)
-	defer iter.Stop()
-	for {
-		var doc storageItem
-		if err := iter.Next(ctx, &doc); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
-		}
-		out := bytes.NewBuffer(nil)
-		if err := yaml.NewEncoder(out).Encode(doc); err != nil {
-			return err
-		}
-		if err := s.metadataBucket.WriteAll(ctx, doc.IDHash, out.Bytes(), nil); err != nil {
-			return err
-		}
+	if err != nil || len(s.classes) == 0 {
+		s.classes = eridanus.DefaultClasses() // only if none existing
 	}
 	return nil
 }
 
+func (s *Storage) saveClassesToStorage() error {
+	b, err := yaml.Marshal(s.classes)
+	if err != nil {
+		return err
+	}
+	return s.PutData(classesBlobKey, bytes.NewReader(b))
+}
+
 // Cookies implements the Cookies method of the http.CookieJar interface.
 func (s *Storage) Cookies(u *url.URL) []*http.Cookie {
-	return s.cookieJar.Cookies(u)
+	cookies := s.cookies.Cookies(u)
+	logrus.WithField("cookie", "get").WithField("url", u).Debug(cookies)
+	return cookies
 }
 
 // SetCookies implements the SetCookies method of the http.CookieJar interface.
 func (s *Storage) SetCookies(u *url.URL, cookies []*http.Cookie) {
-	s.cookieJar.SetCookies(u, cookies)
+	logrus.WithField("cookie", "set").WithField("url", u).Debug(cookies)
+	s.cookies.SetCookies(u, cookies)
 }
 
 // PutData stores arbitrary data.
-func (s *Storage) PutData(ctx context.Context, key string, r io.Reader, opts *blob.WriterOptions) error {
-	w, err := s.bucket.NewWriter(ctx, key, opts)
-	if err != nil {
-		return err
-	}
-	if _, err := w.ReadFrom(r); err != nil {
-		return err
-	}
-	return w.Close()
+func (s *Storage) PutData(key string, r io.Reader) error {
+	return s.kvStore.WriteStream(filepath.FromSlash(key), r, false)
+}
+
+// HasData checks for the presence of arbitrary data.
+func (s *Storage) HasData(key string) bool {
+	return s.kvStore.Has(filepath.FromSlash(key))
 }
 
 // GetData fetches arbitrary data.
-func (s *Storage) GetData(ctx context.Context, key string, opts *blob.ReaderOptions) (io.Reader, error) {
-	has, err := s.bucket.Exists(ctx, key)
-	if err != nil {
-		return nil, err
+func (s *Storage) GetData(key string) (io.ReadCloser, error) {
+	return s.kvStore.ReadStream(filepath.FromSlash(key), false)
+}
+
+// DeleteData removes arbitrary data.
+func (s *Storage) DeleteData(key string) error {
+	return s.kvStore.Erase(filepath.FromSlash(key))
+}
+
+// Keys returns a list of all keys under the provided prefix.
+func (s *Storage) Keys(prefix string) ([]string, error) {
+	var keys []string
+	for key := range s.kvStore.KeysPrefix(prefix, nil) {
+		keys = append(keys, key)
 	}
-	if !has {
-		return nil, eridanus.ErrItemNotFound
-	}
-	r, err := s.bucket.NewReader(ctx, key, opts)
-	if err != nil {
-		return nil, err
-	}
-	data, err := ioutil.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	if err := r.Close(); err != nil {
-		return nil, err
-	}
-	return bytes.NewReader(data), nil
+	return keys, nil
 }
 
 // GetAllParsers returns all current parsers.
-func (s *Storage) GetAllParsers(ctx context.Context) []*eridanus.Parser {
+func (s *Storage) GetAllParsers() []*eridanus.Parser {
 	return s.parsers
 }
 
 // AddParser adds a parser.
-func (s *Storage) AddParser(ctx context.Context, p *eridanus.Parser) error {
+func (s *Storage) AddParser(p *eridanus.Parser) error {
 	s.parsers = append(s.parsers, p)
 	return nil
 }
 
 // GetParserByName returns the named parser.
-func (s *Storage) GetParserByName(ctx context.Context, name string) (*eridanus.Parser, error) {
+func (s *Storage) GetParserByName(name string) (*eridanus.Parser, error) {
 	for _, p := range s.parsers {
 		if p.Name == name {
 			return p, nil
 		}
 	}
-	return nil, xerrors.Errorf("no parser named %s", name)
+	return nil, errors.Errorf("no parser named %s", name)
 }
 
-// FindParsers returns a list of parsers applicable to the provided URLCLassifier.
-func (s *Storage) FindParsers(ctx context.Context, c *eridanus.URLClassifier) ([]*eridanus.Parser, error) {
-	return nil, xerrors.New("not yet implemented")
+// ParsersFor returns a list of parsers applicable to the provided URLClass.
+func (s *Storage) ParsersFor(c *eridanus.URLClass) ([]*eridanus.Parser, error) {
+	var keep []*eridanus.Parser
+
+	pts := eridanus.ClassifierParserTypes[c.GetClass()]
+	for _, p := range s.GetAllParsers() {
+		var has bool
+		for _, pt := range pts {
+			has = has || p.GetType() == pt
+		}
+		if !has {
+			continue
+		}
+		for _, ru := range p.GetUrls() {
+			u, err := url.Parse(ru)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := eridanus.ApplyClassifier(c, u); err == nil {
+				keep = append(keep, p)
+				break
+			}
+		}
+	}
+	return keep, nil
 }
 
 // GetAllClassifiers returns all current classifiers.
-func (s *Storage) GetAllClassifiers(ctx context.Context) []*eridanus.URLClassifier {
+func (s *Storage) GetAllClassifiers() []*eridanus.URLClass {
 	return s.classes
 }
 
 // AddClassifier adds a classifier.
-func (s *Storage) AddClassifier(ctx context.Context, c *eridanus.URLClassifier) error {
+func (s *Storage) AddClassifier(c *eridanus.URLClass) error {
 	s.classes = append(s.classes, c)
 	return nil
 }
 
 // GetClassifierByName returns the named classifier.
-func (s *Storage) GetClassifierByName(ctx context.Context, name string) (*eridanus.URLClassifier, error) {
+func (s *Storage) GetClassifierByName(name string) (*eridanus.URLClass, error) {
 	for _, c := range s.classes {
 		if c.Name == name {
 			return c, nil
 		}
 	}
-	return nil, xerrors.Errorf("no classifier named %s", name)
-}
-
-// FindClassifier returns a list of parsers applicable to the provided URL.
-func (s *Storage) FindClassifier(ctx context.Context, u *url.URL) (*eridanus.URLClassifier, error) {
-	return nil, xerrors.New("not yet implemented")
+	return nil, errors.Errorf("no classifier named %s", name)
 }
 
 // ContentKeys returns a list of all content item keys.
 func (s *Storage) ContentKeys() ([]string, error) {
-	ctx := context.Background()
-	var keys []string
-	var obj *blob.ListObject
-	var err error
-	for iter := s.contentBucket.List(nil); obj != nil; obj, err = iter.Next(ctx) {
-		if err != nil {
-			logrus.Error(err)
-			continue
-		}
-		if obj.IsDir {
-			continue
-		}
-		keys = append(keys, path.Base(obj.Key))
-	}
-	return keys, nil
+	return s.Keys(contentNamespace)
 }
 
 // HasContent checks of the presence of content for the given hash.
 func (s *Storage) HasContent(idHash string) bool {
-	b, err := s.contentBucket.Exists(context.Background(), idHash)
-	if err != nil {
-		logrus.Error(err)
-		return false
-	}
-	return b
+	cPath := fmt.Sprintf("%s/%s", contentNamespace, idHash)
+	return s.HasData(cPath)
 }
 
 // PutContent adds content, returning the hash.
-func (s *Storage) PutContent(ctx context.Context, r io.Reader) (out string, err error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
+func (s *Storage) PutContent(r io.Reader) (out string, err error) {
 	cBytes, err := ioutil.ReadAll(r)
 	if err != nil {
 		return "", err
@@ -374,18 +354,15 @@ func (s *Storage) PutContent(ctx context.Context, r io.Reader) (out string, err 
 		return "", err
 	}
 
-	if err := s.contentBucket.WriteAll(ctx, idHash, cBytes, nil); err != nil {
-		return "", err
-	}
-
-	if err := s.generateThumbnail(ctx, idHash); err != nil {
+	cPath := fmt.Sprintf("%s/%s", contentNamespace, idHash)
+	if err := s.PutData(cPath, bytes.NewReader(cBytes)); err != nil {
 		return "", err
 	}
 
 	return idHash, nil
 }
 
-func (s *Storage) generateThumbnail(ctx context.Context, idHash string) (err error) {
+func (s *Storage) generateThumbnail(idHash string) (err error) {
 	defer eridanus.RecoveryHandler(func(e error) { err = e })
 
 	r, err := s.GetContent(idHash)
@@ -398,99 +375,74 @@ func (s *Storage) generateThumbnail(ctx context.Context, idHash string) (err err
 		return err
 	}
 
-	tImg := resize.Resize(150, 150, img, resize.NearestNeighbor)
-	tw, err := s.thumbnailBucket.NewWriter(ctx, idHash, nil)
-	if err != nil {
+	tBuf := bytes.NewBuffer(nil)
+	tImg := resize.Thumbnail(150, 150, img, resize.NearestNeighbor)
+	if err := png.Encode(tBuf, tImg); err != nil {
 		return err
 	}
-	if err := png.Encode(tw, tImg); err != nil {
-		return err
-	}
-	return tw.Close()
+
+	tPath := fmt.Sprintf("%s/%s", thumbnailNamespace, idHash)
+	return s.PutData(tPath, tBuf)
 }
 
 // GetContent provides a reader of the content for the given hash.
-func (s *Storage) GetContent(idHash string) (io.Reader, error) {
-	data, err := s.contentBucket.ReadAll(context.Background(), idHash)
-	if err != nil {
-		return nil, err
-	}
-	return bytes.NewReader(data), nil
+func (s *Storage) GetContent(idHash string) (io.ReadCloser, error) {
+	cPath := fmt.Sprintf("%s/%s", contentNamespace, idHash)
+	return s.GetData(cPath)
 }
 
 // GetThumbnail provides a reader of the thumbnail for the given hash.
-func (s *Storage) GetThumbnail(idHash string) (io.Reader, error) {
-	ctx := context.Background()
-	for {
-		data, err := s.thumbnailBucket.ReadAll(ctx, idHash)
-		if err != nil {
-			if false { // not found
-				if err := s.generateThumbnail(ctx, idHash); err != nil {
-					return nil, err
-				}
-				continue
-			}
+func (s *Storage) GetThumbnail(idHash string) (io.ReadCloser, error) {
+	tPath := fmt.Sprintf("%s/%s", thumbnailNamespace, idHash)
+	if !s.HasData(tPath) {
+		if err := s.generateThumbnail(idHash); err != nil {
 			return nil, err
 		}
-		return bytes.NewReader(data), nil
 	}
+	return s.GetData(tPath)
 }
 
 // GetTags provides a string slice of tags for the given hash.
 func (s *Storage) GetTags(idHash string) ([]string, error) {
-	ctx := context.Background()
-
-	doc := &storageItem{IDHash: idHash}
-	if err := s.documents.Get(ctx, doc); err != nil {
-		if !strings.Contains(err.Error(), "code=NotFound") { // isolate NotFound errors
-			return nil, err
+	mPath := fmt.Sprintf("%s/%s", metadataNamespace, idHash)
+	r, err := s.GetData(mPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
 		}
-		newdoc, err := s.defrostMetadata(ctx, idHash)
-		if err != nil {
-			return nil, err
-		}
-		doc = newdoc
+		return nil, err
 	}
-
-	tagSet := stringset.NewFromSlice(doc.Tags...)
-	return tagSet.ToSortedSlice(), nil
-}
-
-func (s *Storage) defrostMetadata(ctx context.Context, idHash string) (*storageItem, error) {
-	has, err := s.metadataBucket.Exists(ctx, idHash)
+	b, err := ioutil.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
-	if !has {
-		return nil, eridanus.ErrItemNotFound
-	}
-	r, err := s.metadataBucket.NewReader(ctx, idHash, nil)
-	if err != nil {
-		return nil, err
-	}
-	var doc storageItem
-	if err := yaml.NewDecoder(r).Decode(&doc); err != nil {
-		return nil, err
-	}
-	if err := r.Close(); err != nil {
-		return nil, err
-	}
-	if err := s.documents.Put(ctx, &doc); err != nil {
-		return nil, err
-	}
-	return &doc, nil
+	tags := strings.Split(string(b), ",")
+	return eridanus.RemoveDuplicateStrings(tags), nil
 }
 
 // PutTags sets a string slice of tags for the given hash.
-func (s *Storage) PutTags(idHash string, tags []string) error {
-	tagSet := stringset.NewFromSlice(tags...)
-	return s.documents.Put(context.Background(), &storageItem{
-		IDHash: idHash,
-		Tags:   tagSet.ToSortedSlice(),
-	})
+func (s *Storage) PutTags(idHash string, newTags []string) error {
+	mPath := fmt.Sprintf("%s/%s", metadataNamespace, idHash)
+	tags := eridanus.RemoveDuplicateStrings(newTags)
+	return s.PutData(mPath, strings.NewReader(strings.Join(tags, ",")))
 }
 
 // Find searches through tags for matches.
 func (s *Storage) Find() ([]string, error) {
-	return nil, nil
+	var idHashes []string
+	keys, err := s.Keys(metadataNamespace)
+	if err != nil {
+		return nil, err
+	}
+	for _, mPath := range keys {
+		idHash := filepath.Base(mPath)
+		tags, err := s.GetTags(idHash)
+		if err != nil {
+			return nil, err
+		}
+		if len(tags) > 0 {
+			idHashes = append(idHashes, idHash)
+		}
+	}
+	return idHashes, nil
 }
