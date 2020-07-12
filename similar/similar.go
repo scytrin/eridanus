@@ -15,7 +15,7 @@ import (
 	"gonum.org/v1/gonum/spatial/vptree"
 )
 
-func buildHash(s eridanus.Storage, idHash string, generate bool) (vptree.Comparable, error) {
+func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptree.Comparable, error) {
 	tags, err := s.GetTags(idHash)
 	if err != nil {
 		return nil, err
@@ -41,15 +41,15 @@ func buildHash(s eridanus.Storage, idHash string, generate bool) (vptree.Compara
 			return nil, err
 		}
 
-		tags = append(tags, fmt.Sprintf("phash:%s", pHash.ToString()))
-		if err := s.PutTags(idHash, tags); err != nil {
+		tags = append(tags, eridanus.Tag(fmt.Sprintf("phash:%s", pHash.ToString())))
+		if err := s.SetTags(idHash, tags); err != nil {
 			return nil, err
 		}
 	}
 	return nil, nil
 }
 
-func buildHashes(s eridanus.Storage, idHashes []string, generate bool) ([]vptree.Comparable, error) {
+func buildHashes(s eridanus.Storage, idHashes eridanus.IDHashes, generate bool) ([]vptree.Comparable, error) {
 	hashStart := time.Now()
 	var hashes []vptree.Comparable
 
@@ -78,10 +78,10 @@ func buildVPTree(hashes []vptree.Comparable, effort int) (*vptree.Tree, error) {
 	return tree, nil
 }
 
-func extractPHashTag(tags []string) (*goimagehash.ImageHash, error) {
+func extractPHashTag(tags eridanus.Tags) (*goimagehash.ImageHash, error) {
 	for _, tag := range tags {
-		if strings.HasPrefix(tag, "phash:") {
-			pHash, err := goimagehash.ImageHashFromString(strings.TrimPrefix(tag, "phash:"))
+		if strings.HasPrefix(string(tag), "phash:") {
+			pHash, err := goimagehash.ImageHashFromString(strings.TrimPrefix(string(tag), "phash:"))
 			if err != nil {
 				return nil, err
 			}
@@ -115,7 +115,7 @@ func generatePHashTag(r io.Reader) (i *goimagehash.ImageHash, err error) {
 }
 
 type cph struct {
-	Hash      string
+	Hash      eridanus.IDHash
 	ImageHash *goimagehash.ImageHash
 }
 
@@ -134,8 +134,8 @@ func (h *cph) Distance(ov vptree.Comparable) float64 {
 	return math.MaxFloat64
 }
 
-func findSimilar(tree *vptree.Tree, target vptree.Comparable, maxDist float64) map[string]float64 {
-	similar := make(map[string]float64)
+func findSimilar(tree *vptree.Tree, target vptree.Comparable, maxDist float64) map[eridanus.IDHash]float64 {
+	similar := make(map[eridanus.IDHash]float64)
 	qh := target.(*cph).Hash
 	d := vptree.NewDistKeeper(maxDist)
 	tree.NearestSet(d, target)
@@ -150,7 +150,7 @@ func findSimilar(tree *vptree.Tree, target vptree.Comparable, maxDist float64) m
 }
 
 // Find returns a map of idHash to perceptive distance from the specified target.
-func Find(s eridanus.Storage, targetIDHash string, effort int, maxDist float64, generate bool) (map[string]float64, error) {
+func Find(s eridanus.Storage, targetIDHash eridanus.IDHash, effort int, maxDist float64, generate bool) (map[eridanus.IDHash]float64, error) {
 	target, err := buildHash(s, targetIDHash, generate)
 	if err != nil {
 		return nil, err

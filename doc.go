@@ -88,9 +88,9 @@ func DefaultClasses() []*URLClass {
 			Path: []*StringMatcher{
 				{Value: "pictures"},
 				{Value: "user"},
-				{Type: MatcherType_REGEX, Value: "[A-Za-z0-9_-]+"},
-				{Type: MatcherType_REGEX, Value: `\d+`},
-				{Type: MatcherType_REGEX, Value: "[^/]+|"},
+				{Type: StringMatcher_REGEX, Value: "[A-Za-z0-9_-]+"},
+				{Type: StringMatcher_REGEX, Value: `\d+`},
+				{Type: StringMatcher_REGEX, Value: "[^/]+|"},
 			},
 			MatchSubdomain: true,
 			AllowSubdomain: true,
@@ -101,7 +101,7 @@ func DefaultClasses() []*URLClass {
 			Path: []*StringMatcher{
 				{Value: "pictures"},
 				{Value: "user"},
-				{Type: MatcherType_REGEX, Value: "[A-Za-z0-9_-]+"},
+				{Type: StringMatcher_REGEX, Value: "[A-Za-z0-9_-]+"},
 			},
 			MatchSubdomain: true,
 			AllowSubdomain: true,
@@ -111,7 +111,7 @@ func DefaultClasses() []*URLClass {
 			Domain: "hentai-foundry.com",
 			Path: []*StringMatcher{
 				{Value: "user"},
-				{Type: MatcherType_REGEX, Value: "[A-Za-z0-9_-]+"},
+				{Type: StringMatcher_REGEX, Value: "[A-Za-z0-9_-]+"},
 				{Value: "profile"},
 			},
 			MatchSubdomain: true,

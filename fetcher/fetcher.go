@@ -1,11 +1,12 @@
 package fetcher
 
 import (
-	"bytes"
 	"context"
-	"crypto/md5"
 	"fmt"
-	"path/filepath"
+	"io/ioutil"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,73 +22,83 @@ import (
 	// https://github.com/PuerkitoBio/fetchbot
 	// https://github.com/antchfx/antch
 
-	// "github.com/ssgreg/stl" // resource locking
+	"github.com/PuerkitoBio/fetchbot"
 	"github.com/alitto/pond"
-	"github.com/geziyor/geziyor"
-	"github.com/geziyor/geziyor/cache"
-	"github.com/geziyor/geziyor/client"
-	"github.com/geziyor/geziyor/export"
-	"github.com/geziyor/geziyor/middleware"
+	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
 	"github.com/scytrin/eridanus"
-	"github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v2"
+	"github.com/sirupsen/logrus" // resource locking
+	_ "golang.org/x/net/http2"   // http2 request and response parsing
+	"golang.org/x/sync/semaphore"
 )
 
 var maxWorkers = 10
 
-// URLToResultsPath transforms a URL into a cache key with a hash component.
-func URLToResultsPath(u string) string {
-	sum := md5.Sum([]byte(u))
-	path := filepath.Join("result_cache", fmt.Sprintf("%x", sum))
-	if logrus.IsLevelEnabled(logrus.DebugLevel) {
-		logrus.Infof("%s => %s", u, path)
+func buildClassParserMap(s eridanus.Storage) map[*eridanus.URLClass][]*eridanus.Parser {
+	d := make(map[*eridanus.URLClass][]*eridanus.Parser)
+	for _, uc := range s.GetAllClassifiers() {
+		for _, p := range s.GetAllParsers() {
+			var good bool
+			for _, su := range p.GetUrls() {
+				u, err := url.Parse(su)
+				if err != nil {
+					continue
+				}
+				if _, err := eridanus.ApplyClassifier(uc, u); err == nil {
+					good = true
+					break
+				}
+			}
+			if good {
+				d[uc] = append(d[uc], p)
+			}
+		}
 	}
-	return path
-}
-
-// URLToWebcachePath transforms a URL into a cache key with a hash component.
-func URLToWebcachePath(u string) string {
-	sum := md5.Sum([]byte(u))
-	path := filepath.Join("web_cache", fmt.Sprintf("%x", sum))
-	if logrus.IsLevelEnabled(logrus.DebugLevel) {
-		logrus.Infof("%s => %s", u, path)
-	}
-	return path
+	return d
 }
 
 // Fetcher fetches content from the internet.
 type Fetcher struct {
-	m     sync.Mutex
-	s     eridanus.Storage
-	p     *pond.WorkerPool
-	gOpts *geziyor.Options
+	m     *sync.RWMutex
+	s     map[string]*semaphore.Weighted
+	sLock map[string]*sync.Mutex
+
+	d  map[*eridanus.URLClass][]*eridanus.Parser
+	rt http.RoundTripper
+
+	p *pond.WorkerPool
+	c *http.Client
+
+	fs eridanus.FetcherStorage
+	cs eridanus.ClassesStorage
+	ps eridanus.ParsersStorage
+	ds eridanus.ContentStorage
+	ts eridanus.TagStorage
 }
 
 // NewFetcher returns a new fetcher instance.
-func NewFetcher(ctx context.Context, s eridanus.Storage) (*Fetcher, error) {
-	f := &Fetcher{s: s}
+func NewFetcher(s eridanus.Storage) (*Fetcher, error) {
+	f := &Fetcher{
+		m: &sync.RWMutex{},
+		s: map[string]*semaphore.Weighted{"": semaphore.NewWeighted(5)},
 
-	f.gOpts = &geziyor.Options{
-		Cache:                       &storageCache{f.s},
-		CachePolicy:                 cache.RFC2616,
-		ConcurrentRequests:          5,
-		ConcurrentRequestsPerDomain: 1,
-		ErrorFunc:                   f.errorFunc,
-		Exporters:                   []export.Exporter{f},
-		ParseFunc:                   f.parseFunc,
-		RequestDelay:                1 * time.Microsecond,
-		RequestDelayRandomize:       true,
-		RequestMiddlewares:          []middleware.RequestProcessor{f},
-		ResponseMiddlewares:         []middleware.ResponseProcessor{f},
-		RobotsTxtDisabled:           true,
+		rt: http.DefaultTransport,
+		fs: s,
+		cs: s,
+		ps: s,
+		ds: s,
+		ts: s,
+		d:  buildClassParserMap(s),
+		p: pond.New(maxWorkers, 0,
+			pond.IdleTimeout(1*time.Second),
+			pond.PanicHandler(func(v interface{}) { logrus.Error(v) }),
+			pond.Strategy(pond.Balanced()),
+		),
 	}
 
-	f.p = pond.New(maxWorkers, 0,
-		pond.IdleTimeout(1*time.Second),
-		// pond.MinWorkers(1),
-		pond.PanicHandler(func(v interface{}) { logrus.Error(v) }),
-		pond.Strategy(pond.Balanced()),
-	)
+	f.c = &http.Client{
+		Transport: f,
+		Jar:       f.fs,
+	}
 
 	return f, nil
 }
@@ -100,142 +111,291 @@ func (f *Fetcher) Close() error {
 	return nil
 }
 
-// Get retrieves and parses a document from the internet.
-func (f *Fetcher) Get(ctx context.Context, u string) (*eridanus.ParseResults, error) {
+// RoundTrip provides a caching RoundTripper.
+func (f *Fetcher) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.m.Lock()
 	defer f.m.Unlock()
 
-	g := geziyor.NewGeziyor(f.gOpts)
-	g.Client.Jar = f.s
-	// g.Exports = make(chan interface{})
-	g.Opt.StartURLs = []string{u}
-	logrus.Infof("starting fetch from %s", u)
-	g.Start()
-
-	return f.Results(u)
-}
-
-// Results returns the parser results from storage.
-func (f *Fetcher) Results(ru string) (*eridanus.ParseResults, error) {
-	rPath := URLToResultsPath(ru)
-
-	rc, err := f.s.GetData(rPath)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-
-	var results eridanus.ParseResults
-	if err := yaml.NewDecoder(rc).Decode(&results); err != nil {
-		return nil, err
-	}
-
-	return &results, nil
-}
-
-// Export handles exported data.
-func (f *Fetcher) Export(exports chan interface{}) {
-	for export := range exports {
-		logrus.Debug(export)
-	}
-}
-
-// ProcessRequest processes a request.
-func (f *Fetcher) ProcessRequest(r *client.Request) {
-}
-
-// ProcessResponse processes a response.
-func (f *Fetcher) ProcessResponse(r *client.Response) {
-}
-
-func (f *Fetcher) errorFunc(g *geziyor.Geziyor, r *client.Request, err error) {
-	logrus.Debugf("ERROR: %s %v", r.URL, err)
-	logrus.Error(err)
-}
-
-func (f *Fetcher) parseFunc(g *geziyor.Geziyor, r *client.Response) {
-	ctx := context.Background()
-	ru := r.Request.URL
-
-	uc, nu, err := eridanus.Classify(ctx, ru, f.s.GetAllClassifiers())
-	if err != nil {
-		if r.IsHTML() || logrus.IsLevelEnabled(logrus.DebugLevel) {
-			logrus.Error(err)
-		}
-		if r.IsHTML() {
-			return
-		}
-	}
-
-	results := &eridanus.ParseResults{}
-	if !r.IsHTML() {
-		idHash, err := f.s.PutContent(bytes.NewReader(r.Body))
-		if err != nil {
-			logrus.Error(err)
-			return
-		}
-		tags, err := f.s.GetTags(idHash)
-		if err != nil {
-			logrus.Error(err)
-			return
-		}
-		tags = append(tags, fmt.Sprintf("source:%s", ru))
-		if err := f.s.PutTags(idHash, tags); err != nil {
-			logrus.Error(err)
-			return
-		}
-	} else {
-		pResults, err := eridanus.Parse(ctx, string(r.Body), uc, f.s.GetAllParsers())
-		if err != nil {
-			logrus.Error(err)
-			return
-		}
-		results.Results = pResults.GetResults()
-	}
-
-	// add source to results
-	src := &eridanus.ParseResult{Type: eridanus.ParseResultType_SOURCE, Value: []string{ru.String()}}
-	if nu != nil && ru.String() != nu.String() {
-		src.Value = append(src.GetValue(), nu.String())
-	}
-	results.Results = append(results.Results, src)
-
-	// process results
-	for _, result := range results.GetResults() {
-		switch result.GetType() {
-		case eridanus.ParseResultType_CONTENT, eridanus.ParseResultType_NEXT, eridanus.ParseResultType_FOLLOW:
-			for i, value := range result.GetValue() {
-				value = r.JoinURL(value)
-				result.Value[i] = value
-
-				req, err := client.NewRequest("GET", value, nil)
-				if err != nil {
-					logrus.Error(err)
-					continue
-				}
-				req.Header.Add("Referer", ru.String())
-				g.Do(req, nil)
-			}
-		}
-	}
-
-	// export results
-	g.Exports <- map[string]interface{}{
-		"url":     ru.String(),
-		"results": results.GetResults(),
-	}
-
-	// serialize results
-	rBytes, err := yaml.Marshal(results)
+	resCache, err := f.fs.GetCached(req.URL)
 	if err != nil {
 		logrus.Error(err)
+	} else {
+		return resCache, nil
+	}
+
+	if f.rt == nil {
+		f.rt = http.DefaultTransport
+	}
+
+	res, err := f.rt.RoundTrip(req)
+	if err := f.fs.SetCached(res.Request.URL, res); err != nil {
+		logrus.Error(err)
+	}
+
+	return res, err
+}
+
+func (f *Fetcher) requestLock(ctx context.Context, u *url.URL) error {
+	f.m.Lock()
+	defer f.m.Unlock()
+
+	if f.s[u.Hostname()] == nil {
+		f.s[u.Hostname()] = semaphore.NewWeighted(1)
+	}
+
+	sLock := f.s[u.Hostname()]
+	if err := sLock.Acquire(ctx, 1); err != nil {
+		return err
+	}
+
+	go func() {
+		<-ctx.Done()
+		sLock.Release(1)
+	}()
+
+	return nil
+}
+
+type fbRequest struct {
+	f   *Fetcher
+	req *http.Request
+	res eridanus.ParseResults
+	err error
+}
+
+func (r *fbRequest) run() {
+	ctx, cancel := context.WithCancel(r.req.Context())
+	defer cancel()
+	r.f.requestLock(ctx, r.req.URL)
+
+	res, err := r.f.c.Do(r.req)
+	if err != nil {
+		r.err = err
 		return
+	}
+	defer res.Body.Close()
+
+	contentType := res.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "text/html") { // ParseHTML
+		if err := r.f.parse(ctx, r.req, res); err != nil {
+			r.err = err
+			return
+		}
+	}
+}
+
+// Queue adds a url to be retrieved and processed.
+func (f *Fetcher) Queue(req *http.Request) {
+	f.p.Submit((&fbRequest{f: f, req: req}).run)
+}
+
+// QueueAndWait adds a url to be retrieved and processed in a synchronous manner.
+func (f *Fetcher) QueueAndWait(req *http.Request) {
+	f.p.SubmitAndWait((&fbRequest{f: f, req: req}).run)
+}
+
+func (f *Fetcher) parse(ctx context.Context, req *http.Request, res *http.Response) error {
+	log := ctxlogrus.Extract(ctx)
+	log.Info("parsing...")
+	ru := res.Request.URL
+	uc, nu, err := eridanus.Classify(ru, f.cs.GetAllClassifiers())
+	if err != nil {
+		return err
+	}
+	log = log.WithField("uc", uc.GetName()).WithField("nu", nu.String())
+
+	if uc.GetClass() == eridanus.URLClass_IGNORE {
+		log.Info("ignoring due to url class")
+		return nil
+	}
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+
+	var tags []string
+	results := &eridanus.ParseResults{Results: []*eridanus.ParseResult{
+		{Type: eridanus.ParseResultType_SOURCE, Value: []string{ru.String()}},
+	}}
+	for _, p := range f.d[uc] {
+		log := log.WithField("p", p.GetName())
+		pr := &eridanus.ParseResult{Value: []string{string(body)}}
+
+		result, err := eridanus.ApplyParser(p, pr)
+		if err != nil {
+			log.Debug(err)
+			continue
+		}
+
+		log.Debug(result)
+		if result == nil {
+			continue
+		}
+
+		switch result.GetType() {
+		case eridanus.ParseResultType_TAG:
+			tags = append(tags, result.GetValue()...)
+		case eridanus.ParseResultType_CONTENT, eridanus.ParseResultType_NEXT, eridanus.ParseResultType_FOLLOW:
+			for i, value := range result.GetValue() {
+				nu, err := ru.Parse(value)
+				if err != nil {
+					log.Error(err)
+					continue
+				}
+				result.Value[i] = nu.String()
+			}
+		}
+
+		results.Results = append(results.GetResults(), result)
 	}
 
 	// persist results
-	rPath := URLToResultsPath(ru.String())
-	if err := f.s.PutData(rPath, bytes.NewReader(rBytes)); err != nil {
-		logrus.Error(err)
+	if err := f.fs.SetResults(ru, results); err != nil {
+		return err
+	}
+
+	for _, result := range results.GetResults() {
+		switch result.GetType() {
+		case eridanus.ParseResultType_CONTENT, eridanus.ParseResultType_NEXT, eridanus.ParseResultType_FOLLOW:
+			for _, value := range result.GetValue() {
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, value, nil)
+				if err != nil {
+					log.Error(err)
+					continue
+				}
+				f.Queue(req)
+			}
+		}
+	}
+	return nil
+}
+
+func (f *Fetcher) parseResponse(fbCtx *fetchbot.Context, res *http.Response, err error) {
+	log := logrus.WithField("ru", res.Request.URL.String())
+	if err != nil {
+		log.WithError(err).Error(err)
+		return
+	}
+
+	log.Info("parsing...")
+	ru := res.Request.URL
+
+	uc, nu, err := eridanus.Classify(ru, f.cs.GetAllClassifiers())
+	if err != nil {
+		log.Debug(err)
+		return
+	}
+	log = log.WithField("uc", uc.GetName()).WithField("nu", nu.String())
+
+	if uc.GetClass() == eridanus.URLClass_IGNORE {
+		log.Info("ignoring due to url class")
+		return
+	}
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	var tags []string
+	results := &eridanus.ParseResults{Results: []*eridanus.ParseResult{
+		{Type: eridanus.ParseResultType_SOURCE, Value: []string{ru.String()}},
+	}}
+	for _, p := range f.d[uc] {
+		log := log.WithField("p", p.GetName())
+		pr := &eridanus.ParseResult{Value: []string{string(body)}}
+
+		result, err := eridanus.ApplyParser(p, pr)
+		if err != nil {
+			log.Debug(err)
+			continue
+		}
+
+		log.Debug(result)
+		if result == nil {
+			continue
+		}
+
+		switch result.GetType() {
+		case eridanus.ParseResultType_TAG:
+			tags = append(tags, result.GetValue()...)
+		case eridanus.ParseResultType_CONTENT, eridanus.ParseResultType_NEXT, eridanus.ParseResultType_FOLLOW:
+			for i, value := range result.GetValue() {
+				nu, err := ru.Parse(value)
+				if err != nil {
+					log.Error(err)
+					continue
+				}
+				result.Value[i] = nu.String()
+			}
+		}
+
+		results.Results = append(results.GetResults(), result)
+	}
+
+	// persist results
+	if err := f.fs.SetResults(ru, results); err != nil {
+		log.Error(err)
+		return
+	}
+
+	for _, result := range results.GetResults() {
+		switch result.GetType() {
+		case eridanus.ParseResultType_CONTENT, eridanus.ParseResultType_NEXT, eridanus.ParseResultType_FOLLOW:
+			for _, value := range result.GetValue() {
+				req, err := http.NewRequestWithContext(res.Request.Context(), http.MethodGet, value, nil)
+				if err != nil {
+					log.Error(err)
+					continue
+				}
+				f.Queue(req)
+			}
+		}
+	}
+}
+
+func (f *Fetcher) handleResponse(fbCtx *fetchbot.Context, res *http.Response, err error) {
+	log := logrus.WithField("ru", res.Request.URL.String())
+	if err != nil {
+		log.WithError(err).Error(err)
+		return
+	}
+
+	log.Info("handling...")
+	ru := res.Request.URL
+
+	uc, nu, err := eridanus.Classify(ru, f.cs.GetAllClassifiers())
+	if err != nil {
+		log.WithError(err).Infof("no class: %s", ru)
+	}
+
+	if uc != nil {
+		log = log.WithField("uc", uc.GetName()).WithField("nu", nu.String())
+		if uc.GetClass() == eridanus.URLClass_IGNORE {
+			log.Debug("ignoring due to url class")
+			return
+		}
+	}
+
+	idHash, err := f.ds.SetContent(res.Body)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+	log = logrus.WithField("h", idHash)
+
+	tags, err := f.ts.GetTags(eridanus.IDHash(idHash))
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	tags = append(tags, eridanus.Tag(fmt.Sprintf("source:%s", ru)))
+
+	if err := f.ts.SetTags(eridanus.IDHash(idHash), tags); err != nil {
+		log.Error(err)
 		return
 	}
 }

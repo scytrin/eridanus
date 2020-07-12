@@ -2,25 +2,29 @@ package idhash
 
 import (
 	"crypto/sha256"
-	"io"
-	"math/big"
+	"encoding/hex"
 	"fmt"
+	"io"
+
+	"github.com/scytrin/eridanus"
+	"github.com/sirupsen/logrus"
 )
 
 // type IDHashStr string
 
-// IDHash returns a hashsum that will be used to identify the content.
-func IDHash(r io.Reader) (string, error) {
+// GenerateIDHash returns a hashsum that will be used to identify the content.
+func GenerateIDHash(r io.Reader) (eridanus.IDHash, error) {
 	h := sha256.New()
 	io.Copy(h, r)
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
+	return eridanus.IDHash(fmt.Sprintf("%x", h.Sum(nil))), nil
 }
 
 // HashToHexColor returns a value acceptable to use in specifying color.
-func HashToHexColor(idHash string) string {
-	i := big.NewInt(0)
-	if _, ok := i.SetString(idHash, 16); !ok {
+func HashToHexColor(idHash eridanus.IDHash) string {
+	c, err := hex.DecodeString(string(idHash))
+	if err != nil {
+		logrus.Error(err)
 		return ""
 	}
-	return i.Mod(i, big.NewInt(0xffffff)).Text(16)
+	return hex.EncodeToString(c[:3])
 }

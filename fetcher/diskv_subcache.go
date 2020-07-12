@@ -2,6 +2,8 @@ package fetcher
 
 import (
 	"bytes"
+	"crypto/md5"
+	"fmt"
 	"io/ioutil"
 	"os"
 
@@ -9,40 +11,52 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+var webcacheNamespace = "web_cache2"
+
 type storageCache struct {
 	s eridanus.Storage
 }
 
+func (c *storageCache) keyTransform(key string) string {
+	logrus.Debug(key)
+	// bad := []string{`/`, `\`, `?`, `%`, `*`, `:`, `|`, `"`, `<`, `>`, `.`, ` `}
+	// for _, v := range bad {
+	// 	key = strings.ReplaceAll(key, v, "_")
+	// }
+	// logrus.Info(key)
+
+	key = fmt.Sprintf("%x", md5.Sum([]byte(key)))
+	return fmt.Sprintf("%s/%s", webcacheNamespace, key)
+}
+
 func (c *storageCache) Get(key string) ([]byte, bool) {
-	wPath := URLToWebcachePath(key)
-	rc, err := c.s.GetData(wPath)
+	cPath := c.keyTransform(key)
+	rc, err := c.s.GetData(cPath)
 	if err != nil {
-		if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		if !os.IsNotExist(err) {
 			logrus.Error(err)
 		}
 		return nil, false
 	}
 	defer rc.Close()
-	wBytes, err := ioutil.ReadAll(rc)
+	data, err := ioutil.ReadAll(rc)
 	if err != nil {
-		if logrus.IsLevelEnabled(logrus.DebugLevel) {
-			logrus.Error(err)
-		}
+		logrus.Error(err)
 		return nil, false
 	}
-	return wBytes, true
+	return data, true
 }
 
 func (c *storageCache) Set(key string, data []byte) {
-	wPath := URLToWebcachePath(key)
-	if err := c.s.PutData(wPath, bytes.NewReader(data)); err != nil {
+	cPath := c.keyTransform(key)
+	if err := c.s.SetData(cPath, bytes.NewReader(data)); err != nil {
 		logrus.Error(err)
 	}
 }
 
 func (c *storageCache) Delete(key string) {
-	wPath := URLToWebcachePath(key)
-	if err := c.s.DeleteData(wPath); err != nil && !os.IsNotExist(err) {
+	cPath := c.keyTransform(key)
+	if err := c.s.DeleteData(cPath); err != nil && !os.IsNotExist(err) {
 		logrus.Error(err)
 	}
 }

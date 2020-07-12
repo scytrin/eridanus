@@ -4,20 +4,21 @@ package com.github.scytrin.eridanus;
 
 option go_package = "github.com/scytrin/eridanus";
 
-enum MatcherType {
-  EXACT = 0;
-  REGEX = 1;
+message Command {
+  string cmd = 1;
+  repeated string data = 2;
+  map<string, string> kv = 3;
 }
 
 message StringMatcher {
+  enum MatcherType {
+    EXACT = 0;
+    REGEX = 1;
+  }
+
   string value = 1;
   MatcherType type = 2;
   string default = 3;
-}
-
-message ParamMatcher {
-  string key = 1;
-  StringMatcher string_matcher = 2;
 }
 
 message URLClass {
@@ -34,7 +35,6 @@ message URLClass {
   string domain = 4;
   repeated StringMatcher path = 5;
   map<string,StringMatcher> query = 6;
-  // repeated ParamMatcher query = 6;
   bool allow_http = 7;
   bool match_subdomain = 9; // if true, matches subdomains
   bool allow_subdomain = 8; // if true, won't alter hostname in normalization
@@ -67,7 +67,6 @@ message Parser {
   ParseResultType type = 2;
   repeated Operation operations = 4;
   repeated string urls = 3;
-
 }
 
 message ParseResult {

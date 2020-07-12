@@ -30,40 +30,131 @@ var (
 	}
 )
 
+// IDHash is a key for identifying an item.
+type IDHash string
+
+func (h IDHash) String() string {
+	return string(h)
+}
+
+// IDHashes are a collection of keys.
+type IDHashes []IDHash
+
+// ToSlice returns a string slice.
+func (hs IDHashes) ToSlice() []string {
+	strs := make([]string, len(hs))
+	for i := range hs {
+		strs = append(strs, hs[i].String())
+	}
+	return strs
+}
+
+// Tag is a bit of metadata for an item.
+type Tag string
+
+func (t Tag) String() string { return string(t) }
+
+// Tags is a collection fo metadata.
+type Tags []Tag
+
+// TagsFromString parses a string composed of tags separated by commas.
+func TagsFromString(tagsStr string) Tags {
+	tags := Tags{}
+	for _, tagStr := range strings.Split(tagsStr, ",") {
+		tags = append(tags, Tag(tagStr))
+	}
+	return tags.OmitDuplicates()
+}
+
+// OmitDuplicates keeps only the first instance of each same string in a slice.
+func (ts Tags) OmitDuplicates() Tags {
+	var out Tags
+	seen := make(map[Tag]bool)
+	for _, e := range ts {
+		if !seen[e] {
+			out = append(out, e)
+			seen[e] = true
+		}
+	}
+	return out
+}
+
+// ToSlice returns a string slice.
+func (ts Tags) ToSlice() []string {
+	tags := ts.OmitDuplicates()
+	strs := make([]string, len(tags))
+	for i := range tags {
+		strs = append(strs, ts[i].String())
+	}
+	return strs
+}
+
+// String returns a string composed of tags separated by commas.
+func (ts Tags) String() string {
+	return strings.Join(ts.ToSlice(), ",")
+}
+
 // StorageBackend powers Storage.
 type StorageBackend interface {
+	GetRootPath() string
 	Close() error
+	Import(srcPath, key string, move bool) error
 	Keys(prefix string) ([]string, error)
-	PutData(key string, r io.Reader) error
+	SetData(key string, r io.Reader) error
 	HasData(key string) bool
 	GetData(key string) (io.ReadCloser, error)
 	DeleteData(key string) error
 }
 
-// Storage manages content.
-type Storage interface {
-	StorageBackend
-	http.CookieJar
-
-	GetRootPath() string
-
-	GetAllParsers() []*Parser
-	AddParser(*Parser) error
-	GetParserByName(string) (*Parser, error)
-
+// ClassesStorage stores classes.
+type ClassesStorage interface {
 	GetAllClassifiers() []*URLClass
 	AddClassifier(*URLClass) error
 	GetClassifierByName(string) (*URLClass, error)
+}
 
-	PutTags(idHash string, tags []string) error
-	GetTags(idHash string) ([]string, error)
-	Find() ([]string, error)
+// ParsersStorage stores parsers.
+type ParsersStorage interface {
+	GetAllParsers() []*Parser
+	AddParser(*Parser) error
+	GetParserByName(string) (*Parser, error)
+}
 
-	ContentKeys() ([]string, error)
-	PutContent(r io.Reader) (idHash string, err error)
-	GetContent(idHash string) (io.ReadCloser, error)
+// TagStorage stores tags.
+type TagStorage interface {
+	TagKeys() (IDHashes, error)
+	SetTags(IDHash, Tags) error
+	HasTags(IDHash) bool
+	GetTags(IDHash) (Tags, error)
+	FindByTags() (IDHashes, error)
+}
 
-	GetThumbnail(idHash string) (io.ReadCloser, error)
+// ContentStorage stores content.
+type ContentStorage interface {
+	ContentKeys() (IDHashes, error)
+	SetContent(io.Reader) (IDHash, error)
+	HasContent(IDHash) bool
+	GetContent(IDHash) (io.ReadCloser, error)
+	GetThumbnail(IDHash) (io.ReadCloser, error)
+}
+
+// FetcherStorage stores web cache related data.
+type FetcherStorage interface {
+	http.CookieJar
+	GetResults(*url.URL) (*ParseResults, error)
+	SetResults(*url.URL, *ParseResults) error
+	GetCached(*url.URL) (*http.Response, error)
+	SetCached(*url.URL, *http.Response) error
+}
+
+// Storage manages data.
+type Storage interface {
+	StorageBackend
+	ClassesStorage
+	ParsersStorage
+	FetcherStorage
+	ContentStorage
+	TagStorage
 }
 
 // Fetcher acquires content.
@@ -72,19 +163,6 @@ type Fetcher interface {
 	Get(context.Context, string) (*ParseResults, error)
 	GetURL(context.Context, *url.URL) (*ParseResults, error)
 	Results(string) (*ParseResults, error)
-}
-
-// RemoveDuplicateStrings keeps only the first instance of each same string in a slice.
-func RemoveDuplicateStrings(in []string) []string {
-	var out []string
-	seen := make(map[string]bool)
-	for _, e := range in {
-		if !seen[e] {
-			out = append(out, e)
-			seen[e] = true
-		}
-	}
-	return out
 }
 
 // RecoveryHandler allows for handling panics.
@@ -174,7 +252,10 @@ func ApplyParser(p *Parser, r *ParseResult) (*ParseResult, error) {
 			return nil, nil
 		}
 
-		result := &ParseResult{Type: p.GetType(), Parser: p.GetName()}
+		result := &ParseResult{
+			Type:   p.GetType(),
+			Parser: p.GetName(),
+		}
 		switch op.GetType() {
 		case Parser_Operation_VALUE:
 			result.Value = append(result.GetValue(), op.GetValue())
@@ -257,9 +338,9 @@ func MatchStringMatcher(m *StringMatcher, value string) bool {
 	default:
 		logrus.Error("match has no defined type")
 		return false
-	case MatcherType_EXACT:
+	case StringMatcher_EXACT:
 		return m.Value == value
-	case MatcherType_REGEX:
+	case StringMatcher_REGEX:
 		pattern, ok := map[string]string{
 			"any":    `[^/]+`,
 			"alpha":  `[A-Za-z]`,
@@ -282,7 +363,7 @@ func MatchStringMatcher(m *StringMatcher, value string) bool {
 }
 
 // Classify returns the highest priority matching URLClass and the URL's normalized form.
-func Classify(ctx context.Context, u *url.URL, ucs []*URLClass) (*URLClass, *url.URL, error) {
+func Classify(u *url.URL, ucs []*URLClass) (*URLClass, *url.URL, error) {
 	var ucKeep *URLClass
 	var urlKeep *url.URL
 	for _, uc := range ucs {
