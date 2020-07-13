@@ -34,9 +34,19 @@ import (
 var maxWorkers = 10
 
 func buildClassParserMap(s eridanus.Storage) map[*eridanus.URLClass][]*eridanus.Parser {
+	classes, err := s.ClassesStorage().GetAll()
+	if err != nil {
+		return nil
+	}
+
+	parsers, err := s.ParsersStorage().GetAll()
+	if err != nil {
+		return nil
+	}
+
 	d := make(map[*eridanus.URLClass][]*eridanus.Parser)
-	for _, uc := range s.GetAllClassifiers() {
-		for _, p := range s.GetAllParsers() {
+	for _, uc := range classes {
+		for _, p := range parsers {
 			var good bool
 			for _, su := range p.GetUrls() {
 				u, err := url.Parse(su)
@@ -82,11 +92,11 @@ func NewFetcher(s eridanus.Storage) (*Fetcher, error) {
 		s: map[string]*semaphore.Weighted{"": semaphore.NewWeighted(5)},
 
 		rt: http.DefaultTransport,
-		fs: s,
-		cs: s,
-		ps: s,
-		ds: s,
-		ts: s,
+		fs: s.FetcherStorage(),
+		cs: s.ClassesStorage(),
+		ps: s.ParsersStorage(),
+		ds: s.ContentStorage(),
+		ts: s.TagStorage(),
 		d:  buildClassParserMap(s),
 		p: pond.New(maxWorkers, 0,
 			pond.IdleTimeout(1*time.Second),
@@ -198,7 +208,13 @@ func (f *Fetcher) parse(ctx context.Context, req *http.Request, res *http.Respon
 	log := ctxlogrus.Extract(ctx)
 	log.Info("parsing...")
 	ru := res.Request.URL
-	uc, nu, err := eridanus.Classify(ru, f.cs.GetAllClassifiers())
+
+	classes, err := f.cs.GetAll()
+	if err != nil {
+		return err
+	}
+
+	uc, nu, err := eridanus.Classify(ru, classes)
 	if err != nil {
 		return err
 	}
@@ -281,7 +297,13 @@ func (f *Fetcher) parseResponse(fbCtx *fetchbot.Context, res *http.Response, err
 	log.Info("parsing...")
 	ru := res.Request.URL
 
-	uc, nu, err := eridanus.Classify(ru, f.cs.GetAllClassifiers())
+	classes, err := f.cs.GetAll()
+	if err != nil {
+		log.Debug(err)
+		return
+	}
+
+	uc, nu, err := eridanus.Classify(ru, classes)
 	if err != nil {
 		log.Debug(err)
 		return
@@ -366,7 +388,13 @@ func (f *Fetcher) handleResponse(fbCtx *fetchbot.Context, res *http.Response, er
 	log.Info("handling...")
 	ru := res.Request.URL
 
-	uc, nu, err := eridanus.Classify(ru, f.cs.GetAllClassifiers())
+	classes, err := f.cs.GetAll()
+	if err != nil {
+		log.Debug(err)
+		return
+	}
+
+	uc, nu, err := eridanus.Classify(ru, classes)
 	if err != nil {
 		log.WithError(err).Infof("no class: %s", ru)
 	}

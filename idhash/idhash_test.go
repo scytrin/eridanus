@@ -13,13 +13,13 @@ var (
 	hashes = [][3]string{
 		{"This is just a random string.",
 			"94c22bf841b30ff895f075c8c8b8625539ef6f2ef2fd7ae196251d08e9db2a38",
-			"94c22b"},
+			"#94c22b"},
 		{"aaaa",
 			"61be55a8e2f6b4e172338bddf184d6dbee29c98853e0a0485ecee7f27b9af0b4",
-			"61be55"},
+			"#61be55"},
 		{"bbbb",
 			"81cc5b17018674b401b42f35ba07bb79e211239c23bffe658da1577e3e646877",
-			"81cc5b"},
+			"#81cc5b"},
 	}
 )
 
@@ -35,21 +35,10 @@ func TestIDHash(t *testing.T) {
 			if idhash != eridanus.IDHash(h) {
 				t.Errorf("GenerateIDHash(r): got %x, want %x", idhash, h)
 			}
-			color := HashToHexColor(idhash)
+			color := idhash.HexColor()
 			if color != c {
-				t.Errorf("HashToHexColor(hash): got %q, want %q", color, c)
+				t.Errorf("idhash.HexColor(): got %q, want %q", color, c)
 			}
 		})
 	}
-}
-
-func TestHashToHexColor(t *testing.T) {
-	testHash := eridanus.IDHash("this will end horribly")
-	expectedResult := ""
-	t.Run("bad hash", func(t *testing.T) {
-		color := HashToHexColor(testHash)
-		if color != expectedResult {
-			t.Errorf("HashToHexColor(hash): got %q, want %q", color, expectedResult)
-		}
-	})
 }

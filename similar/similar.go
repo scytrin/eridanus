@@ -16,7 +16,7 @@ import (
 )
 
 func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptree.Comparable, error) {
-	tags, err := s.GetTags(idHash)
+	tags, err := s.TagStorage().GetTags(idHash)
 	if err != nil {
 		return nil, err
 	}
@@ -31,7 +31,7 @@ func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptre
 			return nil, errors.Errorf("no phash for %s, generation disallowed", idHash)
 		}
 
-		r, err := s.GetContent(idHash)
+		r, err := s.ContentStorage().GetContent(idHash)
 		if err != nil {
 			return nil, err
 		}
@@ -42,7 +42,7 @@ func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptre
 		}
 
 		tags = append(tags, eridanus.Tag(fmt.Sprintf("phash:%s", pHash.ToString())))
-		if err := s.SetTags(idHash, tags); err != nil {
+		if err := s.TagStorage().SetTags(idHash, tags); err != nil {
 			return nil, err
 		}
 	}
@@ -86,7 +86,7 @@ func extractPHashTag(tags eridanus.Tags) (*goimagehash.ImageHash, error) {
 				return nil, err
 			}
 			if pHash.GetKind() != goimagehash.PHash {
-				return nil, errors.Errorf("phash type mismatch: %s", pHash.GetKind())
+				return nil, errors.Errorf("phash type mismatch: %v", pHash.GetKind())
 			}
 			return pHash, nil
 		}
@@ -155,7 +155,7 @@ func Find(s eridanus.Storage, targetIDHash eridanus.IDHash, effort int, maxDist 
 	if err != nil {
 		return nil, err
 	}
-	idHashes, err := s.ContentKeys()
+	idHashes, err := s.ContentStorage().ContentKeys()
 	if err != nil {
 		return nil, err
 	}

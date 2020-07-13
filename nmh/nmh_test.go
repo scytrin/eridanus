@@ -2,7 +2,6 @@ package nmh
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,11 +33,16 @@ func TestNMH(t *testing.T) {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			r := bytes.NewBuffer(nil)
 			w := bytes.NewBuffer(nil)
+
 			// preload a message
-			if err := Put(r, &eridanus.Command{Cmd: test.cmd, Data: test.data}); err != nil {
+			cmd := &eridanus.Command{Cmd: test.cmd, Data: test.data}
+			if err := Put(r, cmd); err != nil {
 				t.Fatal(err)
 			}
+
+			var gotCmd bool
 			if err := Run(r, w, func(cmd *eridanus.Command, send Sender) error {
+				gotCmd = true
 				if cmd.Cmd != test.cmd {
 					t.Errorf("cmd mismatch: got %s, want %s", cmd.Cmd, test.cmd)
 				}
@@ -46,7 +50,7 @@ func TestNMH(t *testing.T) {
 					t.Errorf("data mismatch diff: %s", diff)
 				}
 				return send(cmd)
-			}); err != nil {
+			}); err != nil && !gotCmd {
 				t.Fatal(err)
 			}
 		})
@@ -78,15 +82,15 @@ func TestPut(t *testing.T) {
 		{"nil args",
 			nil,
 			nil,
-			ErrNilWriter},
+			eridanus.ErrNilWriter},
 		{"nil writer",
 			nil,
 			&eridanus.Command{},
-			ErrNilWriter},
+			eridanus.ErrNilWriter},
 		{"nil command",
 			bytes.NewBuffer(nil),
 			nil,
-			ErrNilCommand},
+			eridanus.ErrNilCommand},
 		{"fail on write 0",
 			&failOnWrite{0},
 			&eridanus.Command{},
@@ -112,17 +116,17 @@ func TestGet(t *testing.T) {
 	}{
 		{"nil reader",
 			nil,
-			ErrNilReader},
+			eridanus.ErrNilReader},
 		{"empty reader",
 			bytes.NewBuffer(nil),
 			io.EOF},
 		{"bad json",
 			strings.NewReader("fa;lskjdf;lsdkjf;sldkjf;sk"),
-			&json.MarshalerError{}},
+			errors.New("invalid character 's' looking for beginning of value")},
 	} {
 		t.Run(test.label, func(t *testing.T) {
-			if _, err := Get(test.r); err != test.wantErr {
-				t.Errorf("Get(...): got %v, want %v", err, test.wantErr)
+			if _, err := Get(test.r); err.Error() != test.wantErr.Error() {
+				t.Errorf("Get(...): got %q, want %q", err, test.wantErr)
 			}
 		})
 	}

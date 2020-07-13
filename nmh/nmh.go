@@ -4,20 +4,14 @@ package nmh
 import (
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"io"
 
 	"github.com/scytrin/eridanus"
+	"github.com/sirupsen/logrus"
 )
 
 var (
 	msgSizeBytesLen = binary.Size(uint32(0))
-	// ErrNilCommand is emitted when a nil *eridanis.Command is passed to Put or Run
-	ErrNilCommand = errors.New("nil command provided")
-	// ErrNilReader is emitted when a nil io.Reader is passed to Get or Run
-	ErrNilReader = errors.New("nil reader provided")
-	// ErrNilWriter is emitted when a nil io.Writer is passed to Put or Run
-	ErrNilWriter = errors.New("nil writer provided")
 )
 
 // Sender is a method to handle messages.
@@ -29,7 +23,7 @@ type Handler func(*eridanus.Command, Sender) error
 // Get reads a message from the provided io.Reader.
 func Get(r io.Reader) (*eridanus.Command, error) {
 	if r == nil {
-		return nil, ErrNilReader
+		return nil, eridanus.ErrNilReader
 	}
 
 	slr := io.LimitReader(r, int64(msgSizeBytesLen))
@@ -44,17 +38,18 @@ func Get(r io.Reader) (*eridanus.Command, error) {
 		return nil, err
 	}
 
+	logrus.Infof("Get(r): [%d]%q", size, &cmd)
 	return &cmd, nil
 }
 
 // Put writes a message to the provided io.Writer.
 func Put(w io.Writer, cmd *eridanus.Command) error {
 	if w == nil {
-		return ErrNilWriter
+		return eridanus.ErrNilWriter
 	}
 
 	if cmd == nil {
-		return ErrNilCommand
+		return eridanus.ErrNilCommand
 	}
 
 	out, err := json.Marshal(cmd)

@@ -84,11 +84,17 @@ func main() {
 				return err
 			}
 
-			classes := &eridanus.Command{Cmd: "classes"}
-			for _, uc := range s.GetAllClassifiers() {
-				classes.Data = append(classes.Data, fmt.Sprint(uc.GetName()))
+			classes, err := s.ClassesStorage().GetAll()
+			if err != nil {
+				return err
 			}
-			if err := send(classes); err != nil {
+
+			cmd := &eridanus.Command{Cmd: "classes"}
+			for _, uc := range classes {
+				cmd.Data = append(cmd.Data, fmt.Sprint(uc.GetName()))
+			}
+
+			if err := send(cmd); err != nil {
 				return err
 			}
 		default:

@@ -4,15 +4,17 @@ package eridanus
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/xmlpath.v2"
 	// "github.com/mingrammer/commonregex"
@@ -21,6 +23,12 @@ import (
 var (
 	// ErrItemNotFound is an identifiable error for "NotFound"
 	ErrItemNotFound = errors.New("item not found")
+	// ErrNilCommand is emitted when a nil *eridanis.Command is passed to nmh.Put or nmh.Run
+	ErrNilCommand = errors.New("nil command provided")
+	// ErrNilReader is emitted when a nil io.Reader is passed to nmh.Get or nmh.Run
+	ErrNilReader = errors.New("nil reader provided")
+	// ErrNilWriter is emitted when a nil io.Writer is passed to nmh.Put or nmh.Run
+	ErrNilWriter = errors.New("nil writer provided")
 
 	// ClassifierParserTypes specifies what parser results are expected per url classification.
 	ClassifierParserTypes = map[URLClass_Class][]ParseResultType{
@@ -37,14 +45,24 @@ func (h IDHash) String() string {
 	return string(h)
 }
 
+// HexColor returns a variant of the hash for color specification.
+func (h IDHash) HexColor() string {
+	c, err := hex.DecodeString(string(h))
+	if err != nil {
+		logrus.Error(err)
+		return ""
+	}
+	return "#" + hex.EncodeToString(c[:3])
+}
+
 // IDHashes are a collection of keys.
 type IDHashes []IDHash
 
 // ToSlice returns a string slice.
 func (hs IDHashes) ToSlice() []string {
-	strs := make([]string, len(hs))
-	for i := range hs {
-		strs = append(strs, hs[i].String())
+	var strs []string
+	for _, v := range hs {
+		strs = append(strs, v.String())
 	}
 	return strs
 }
@@ -52,7 +70,9 @@ func (hs IDHashes) ToSlice() []string {
 // Tag is a bit of metadata for an item.
 type Tag string
 
-func (t Tag) String() string { return string(t) }
+func (t Tag) String() string {
+	return string(t)
+}
 
 // Tags is a collection fo metadata.
 type Tags []Tag
@@ -63,6 +83,9 @@ func TagsFromString(tagsStr string) Tags {
 	for _, tagStr := range strings.Split(tagsStr, ",") {
 		tags = append(tags, Tag(tagStr))
 	}
+	sort.SliceStable(tags, func(i, j int) bool {
+		return tags[i] < tags[j]
+	})
 	return tags.OmitDuplicates()
 }
 
@@ -81,10 +104,9 @@ func (ts Tags) OmitDuplicates() Tags {
 
 // ToSlice returns a string slice.
 func (ts Tags) ToSlice() []string {
-	tags := ts.OmitDuplicates()
-	strs := make([]string, len(tags))
-	for i := range tags {
-		strs = append(strs, ts[i].String())
+	var strs []string
+	for _, v := range ts.OmitDuplicates() {
+		strs = append(strs, v.String())
 	}
 	return strs
 }
@@ -108,16 +130,18 @@ type StorageBackend interface {
 
 // ClassesStorage stores classes.
 type ClassesStorage interface {
-	GetAllClassifiers() []*URLClass
-	AddClassifier(*URLClass) error
-	GetClassifierByName(string) (*URLClass, error)
+	Add(*URLClass) error
+	GetAll() ([]*URLClass, error)
+	GetByName(string) (*URLClass, error)
+	For(*url.URL) (*URLClass, error)
 }
 
 // ParsersStorage stores parsers.
 type ParsersStorage interface {
-	GetAllParsers() []*Parser
-	AddParser(*Parser) error
-	GetParserByName(string) (*Parser, error)
+	Add(*Parser) error
+	GetAll() ([]*Parser, error)
+	GetByName(string) (*Parser, error)
+	For(*URLClass) ([]*Parser, error)
 }
 
 // TagStorage stores tags.
@@ -150,11 +174,11 @@ type FetcherStorage interface {
 // Storage manages data.
 type Storage interface {
 	StorageBackend
-	ClassesStorage
-	ParsersStorage
-	FetcherStorage
-	ContentStorage
-	TagStorage
+	ClassesStorage() ClassesStorage
+	ParsersStorage() ParsersStorage
+	TagStorage() TagStorage
+	ContentStorage() ContentStorage
+	FetcherStorage() FetcherStorage
 }
 
 // Fetcher acquires content.
@@ -167,22 +191,14 @@ type Fetcher interface {
 
 // RecoveryHandler allows for handling panics.
 func RecoveryHandler(f func(error)) {
-	r := recover()
-	if r == nil {
-		return
-	}
-	logrus.Debugf("recovery: %v", r)
-
-	var err error
-	switch rerr := r.(type) {
+	switch rerr := recover().(type) {
 	case error:
-		err = rerr
+		f(rerr)
 	case string:
-		err = errors.New(rerr)
+		f(errors.New(rerr))
 	default:
-		err = errors.Errorf("panicked: %v", rerr)
+		f(fmt.Errorf("panicked: %v", rerr))
 	}
-	f(err)
 }
 
 // Parse applies provided parsers to the provided input.
@@ -379,7 +395,7 @@ func Classify(u *url.URL, ucs []*URLClass) (*URLClass, *url.URL, error) {
 	if ucKeep != nil && urlKeep != nil {
 		return ucKeep, urlKeep, nil
 	}
-	return nil, nil, errors.Errorf("no classifier for %s", u)
+	return nil, nil, fmt.Errorf("no classifier for %s", u)
 }
 
 // ApplyClassifier applies a classifier to a URL, returning a normalized url or an error if the classifier doesn't apply.
@@ -395,11 +411,11 @@ func ApplyClassifier(uc *URLClass, ou *url.URL) (*url.URL, error) {
 	// possibly allow specifying multiple domains
 	if u.Hostname() != uc.GetDomain() {
 		if !uc.MatchSubdomain {
-			return nil, errors.Errorf("domain mismatch: got %s, want %s", u.Hostname(), uc.GetDomain())
+			return nil, fmt.Errorf("domain mismatch: got %s, want %s", u.Hostname(), uc.GetDomain())
 		}
 		sDomain := "." + uc.Domain
 		if !strings.HasSuffix(u.Hostname(), sDomain) {
-			return nil, errors.Errorf("subdomain mismatch: got %s, want %s", u.Hostname(), sDomain)
+			return nil, fmt.Errorf("subdomain mismatch: got %s, want %s", u.Hostname(), sDomain)
 		}
 		// https://github.com/hydrusnetwork/hydrus/blob/1976391fd0a37c9caf607127b7a9a2d86a197d3c/hydrus/client/networking/ClientNetworkingDomain.py#L2774
 		if !uc.AllowSubdomain {
@@ -414,7 +430,7 @@ func ApplyClassifier(uc *URLClass, ou *url.URL) (*url.URL, error) {
 	for i, m := range uc.GetPath() {
 		if i < len(pathParts) {
 			if !MatchStringMatcher(m, pathParts[i]) {
-				return nil, errors.Errorf("path segment mismatch: got %q, want %v", pathParts[i], m)
+				return nil, fmt.Errorf("path segment mismatch: got %q, want %v", pathParts[i], m)
 			}
 			cp = append(cp, pathParts[i])
 			continue
@@ -423,7 +439,7 @@ func ApplyClassifier(uc *URLClass, ou *url.URL) (*url.URL, error) {
 			cp = append(cp, m.Default)
 			continue
 		}
-		return nil, errors.Errorf("path length mismatch: got %d, want %d", len(pathParts), len(uc.GetPath()))
+		return nil, fmt.Errorf("path length mismatch: got %d, want %d", len(pathParts), len(uc.GetPath()))
 	}
 	u.RawPath = "/" + strings.Join(cp, "/")
 
@@ -434,7 +450,7 @@ func ApplyClassifier(uc *URLClass, ou *url.URL) (*url.URL, error) {
 		if vs, ok := q[k]; ok {
 			for i, v := range vs {
 				if !MatchStringMatcher(m, v) {
-					return nil, errors.Errorf("query param mismatch: %s[%d]=%q %v", k, i, v, m)
+					return nil, fmt.Errorf("query param mismatch: %s[%d]=%q %v", k, i, v, m)
 				}
 			}
 			continue
