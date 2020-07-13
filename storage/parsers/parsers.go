@@ -2,73 +2,75 @@ package parsers
 
 import (
 	"bytes"
+	"fmt"
 	"net/url"
-	"os"
 
-	"github.com/pkg/errors"
 	"github.com/scytrin/eridanus"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	parsersBlobKey = "config/parsers.yaml"
+	parsersNamespace = "parsers"
+	parsersBlobKey   = "config/parsers.yaml"
 )
 
-type parsersStorage struct {
-	be eridanus.StorageBackend
-}
+type parsersStorage struct{ be eridanus.StorageBackend }
 
 // NewParsersStorage provides a new ParsersStorage.
 func NewParsersStorage(be eridanus.StorageBackend) eridanus.ParsersStorage {
 	return &parsersStorage{be}
 }
 
-// GetAllParsers returns all current parsers.
-func (s *parsersStorage) GetAll() ([]*eridanus.Parser, error) {
-	var parsers []*eridanus.Parser
-	rc, err := s.be.Get(parsersBlobKey)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		return eridanus.DefaultParsers(), nil
-	}
-	defer rc.Close()
-	if err := yaml.NewDecoder(rc).Decode(&parsers); err != nil {
-		return nil, err
-	}
-	if err != nil || len(parsers) == 0 {
-		return eridanus.DefaultParsers(), err // only if none existing
-	}
-	return parsers, nil
+// Keys returns a list of all parser names.
+func (s *parsersStorage) Keys() ([]string, error) {
+	return s.be.Keys(parsersNamespace)
 }
 
 // AddParser adds a parser.
 func (s *parsersStorage) Add(p *eridanus.Parser) error {
-	parsers, err := s.GetAll()
-	if err != nil {
+	pPath := fmt.Sprintf("%s/%s", parsersNamespace, p.GetName())
+	buf := bytes.NewBuffer(nil)
+	if err := yaml.NewEncoder(buf).Encode(p); err != nil {
 		return err
 	}
-	parsers = append(parsers, p)
-	pBytes, err := yaml.Marshal(parsers)
-	if err != nil {
-		return err
-	}
-	return s.be.Set(parsersBlobKey, bytes.NewReader(pBytes))
+	return s.be.Set(pPath, buf)
 }
 
-// GetByName returns the named parser.
-func (s *parsersStorage) GetByName(name string) (*eridanus.Parser, error) {
-	parsers, err := s.GetAll()
+// Get returns the named parser.
+func (s *parsersStorage) Get(name string) (*eridanus.Parser, error) {
+	pPath := fmt.Sprintf("%s/%s", parsersNamespace, name)
+	rc, err := s.be.Get(pPath)
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range parsers {
-		if p.Name == name {
-			return p, nil
-		}
+	var retval eridanus.Parser
+	if err := yaml.NewDecoder(rc).Decode(&retval); err != nil {
+		return nil, err
 	}
-	return nil, errors.Errorf("no parser named %s", name)
+	return &retval, nil
+}
+
+// GetAllParsers returns all current parsers.
+func (s *parsersStorage) GetAll() ([]*eridanus.Parser, error) {
+	var vs []*eridanus.Parser
+	keys, err := s.be.Keys(parsersNamespace)
+	for _, k := range keys {
+		rc, err := s.be.Get(k)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+
+		var v *eridanus.Parser
+		if err := yaml.NewDecoder(rc).Decode(&v); err != nil {
+			return nil, err
+		}
+		vs = append(vs, v)
+	}
+	if err != nil || len(vs) == 0 {
+		vs = eridanus.DefaultParsers() // only if none existing
+	}
+	return vs, nil
 }
 
 // For returns a list of parsers applicable to the provided URLClass.

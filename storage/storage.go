@@ -10,7 +10,7 @@ import (
 	"sync"
 
 	"github.com/scytrin/eridanus"
-	"github.com/scytrin/eridanus/storage/backend"
+	"github.com/scytrin/eridanus/storage/backend/diskv"
 	"github.com/scytrin/eridanus/storage/classes"
 	"github.com/scytrin/eridanus/storage/content"
 	"github.com/scytrin/eridanus/storage/fetcher"
@@ -63,16 +63,8 @@ func NewStorage(rootPath string) (*Storage, error) {
 	s := &Storage{
 		mux:            new(sync.RWMutex),
 		cookies:        cookies,
-		StorageBackend: backend.NewDiskvBackend(rootPath),
+		StorageBackend: diskv.NewBackend(rootPath),
 	}
-
-	// if err := s.classStorage.load(); err != nil {
-	// 	return nil, err
-	// }
-
-	// if err := s.parserStorage.load(); err != nil {
-	// 	return nil, err
-	// }
 
 	if err := func() error { //cookie persistence
 		rc, err := s.Get(cookiesBlobKey)
@@ -99,13 +91,6 @@ func NewStorage(rootPath string) (*Storage, error) {
 func (s *Storage) Close() error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
-
-	// if err := s.parserStorage.save(); err != nil {
-	// 	logrus.Error(err)
-	// }
-	// if err := s.classStorage.save(); err != nil {
-	// 	logrus.Error(err)
-	// }
 
 	if err := func() error { // cookie persistence
 		b, err := yaml.Marshal(s.cookies.entries)

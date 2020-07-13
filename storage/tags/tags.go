@@ -21,7 +21,7 @@ func NewTagStorage(be eridanus.StorageBackend) eridanus.TagStorage {
 	return &tagStorage{be}
 }
 
-// TagKeys returns a list of all tag item keys.
+// Keys returns a list of all tag item keys.
 func (s *tagStorage) Keys() (eridanus.IDHashes, error) {
 	var idHashes eridanus.IDHashes
 	keys, err := s.be.Keys(metadataNamespace)

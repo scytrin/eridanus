@@ -134,7 +134,7 @@ type StorageBackend interface {
 type ClassesStorage interface {
 	Add(*URLClass) error
 	GetAll() ([]*URLClass, error)
-	GetByName(string) (*URLClass, error)
+	Get(string) (*URLClass, error)
 	For(*url.URL) (*URLClass, error)
 }
 
@@ -142,7 +142,7 @@ type ClassesStorage interface {
 type ParsersStorage interface {
 	Add(*Parser) error
 	GetAll() ([]*Parser, error)
-	GetByName(string) (*Parser, error)
+	Get(string) (*Parser, error)
 	For(*URLClass) ([]*Parser, error)
 }
 

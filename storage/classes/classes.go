@@ -2,8 +2,8 @@ package classes
 
 import (
 	"bytes"
+	"fmt"
 	"net/url"
-	"os"
 
 	"github.com/pkg/errors"
 	"github.com/scytrin/eridanus"
@@ -11,91 +11,67 @@ import (
 )
 
 const (
-	classesBlobKey = "config/classes.yaml"
+	classesNamespace = "classes"
+	classesBlobKey   = "config/classes.yaml"
 )
 
-type classStorage struct {
-	be      eridanus.StorageBackend
-	classes []*eridanus.URLClass
-}
+type classStorage struct{ be eridanus.StorageBackend }
 
 // NewClassesStorage provides a new ClassesStorage.
 func NewClassesStorage(be eridanus.StorageBackend) eridanus.ClassesStorage {
-	return &classStorage{be, nil}
+	return &classStorage{be}
 }
 
-func (s *classStorage) load() error {
-	rc, err := s.be.Get(classesBlobKey)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-	defer rc.Close()
-	if err := yaml.NewDecoder(rc).Decode(&s.classes); err != nil {
-		return err
-	}
-	if err != nil || len(s.classes) == 0 {
-		s.classes = eridanus.DefaultClasses() // only if none existing
-	}
-	return nil
-}
-
-func (s *classStorage) save() error {
-	b, err := yaml.Marshal(s.classes)
-	if err != nil {
-		return err
-	}
-	return s.be.Set(classesBlobKey, bytes.NewReader(b))
-}
-
-// GetAll returns all current classifiers.
-func (s *classStorage) GetAll() ([]*eridanus.URLClass, error) {
-	var classes []*eridanus.URLClass
-	rc, err := s.be.Get(classesBlobKey)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		return eridanus.DefaultClasses(), err
-	}
-	defer rc.Close()
-	if err := yaml.NewDecoder(rc).Decode(&classes); err != nil {
-		return nil, err
-	}
-	if err != nil || len(classes) == 0 {
-		classes = eridanus.DefaultClasses() // only if none existing
-	}
-	return classes, nil
+// Keys returns a list of all class names.
+func (s *classStorage) Keys() ([]string, error) {
+	return s.be.Keys(classesNamespace)
 }
 
 // Add adds a classifier.
 func (s *classStorage) Add(c *eridanus.URLClass) error {
-	classes, err := s.GetAll()
-	if err != nil {
+	cPath := fmt.Sprintf("%s/%s", classesNamespace, c.GetName())
+	buf := bytes.NewBuffer(nil)
+	if err := yaml.NewEncoder(buf).Encode(c); err != nil {
 		return err
 	}
-	classes = append(classes, c)
-	pBytes, err := yaml.Marshal(classes)
-	if err != nil {
-		return err
-	}
-	return s.be.Set(classesBlobKey, bytes.NewReader(pBytes))
+	return s.be.Set(cPath, buf)
 }
 
-// GetByName returns the named classifier.
-func (s *classStorage) GetByName(name string) (*eridanus.URLClass, error) {
-	classes, err := s.GetAll()
+// Get returns the named classifier.
+func (s *classStorage) Get(name string) (*eridanus.URLClass, error) {
+	cPath := fmt.Sprintf("%s/%s", classesNamespace, name)
+	rc, err := s.be.Get(cPath)
 	if err != nil {
 		return nil, err
 	}
-	for _, c := range classes {
-		if c.Name == name {
-			return c, nil
-		}
+	var retval eridanus.URLClass
+	if err := yaml.NewDecoder(rc).Decode(&retval); err != nil {
+		return nil, err
 	}
-	return nil, errors.Errorf("no classifier named %s", name)
+	return &retval, nil
+}
+
+// GetAll returns all current classifiers.
+func (s *classStorage) GetAll() ([]*eridanus.URLClass, error) {
+	var vs []*eridanus.URLClass
+	keys, err := s.be.Keys(classesNamespace)
+	for _, k := range keys {
+		rc, err := s.be.Get(k)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+
+		var v *eridanus.URLClass
+		if err := yaml.NewDecoder(rc).Decode(&v); err != nil {
+			return nil, err
+		}
+		vs = append(vs, v)
+	}
+	if err != nil || len(vs) == 0 {
+		vs = eridanus.DefaultClasses() // only if none existing
+	}
+	return vs, nil
 }
 
 func (s *classStorage) For(u *url.URL) (*eridanus.URLClass, error) {
