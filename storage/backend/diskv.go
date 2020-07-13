@@ -73,23 +73,23 @@ func (be *DiskvBackend) Import(srcPath, key string, move bool) error {
 	return be.kv.Import(srcPath, key, move)
 }
 
-// HasData checks for the presence of arbitrary data.
-func (be *DiskvBackend) HasData(key string) bool {
+// Has checks for the presence of arbitrary data.
+func (be *DiskvBackend) Has(key string) bool {
 	return be.kv.Has(key)
 }
 
-// SetData stores arbitrary data.
-func (be *DiskvBackend) SetData(key string, r io.Reader) error {
+// Set stores arbitrary data.
+func (be *DiskvBackend) Set(key string, r io.Reader) error {
 	return be.kv.WriteStream(key, r, false)
 }
 
-// GetData fetches arbitrary data.
-func (be *DiskvBackend) GetData(key string) (io.ReadCloser, error) {
+// Get fetches arbitrary data.
+func (be *DiskvBackend) Get(key string) (io.ReadCloser, error) {
 	return be.kv.ReadStream(key, false)
 }
 
-// DeleteData removes arbitrary data.
-func (be *DiskvBackend) DeleteData(key string) error {
+// Delete removes arbitrary data.
+func (be *DiskvBackend) Delete(key string) error {
 	return be.kv.Erase(key)
 }
 

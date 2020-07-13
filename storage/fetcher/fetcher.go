@@ -1,4 +1,4 @@
-package storage
+package fetcher
 
 import (
 	"bufio"
@@ -16,8 +16,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const (
+	webcacheNamespace  = "web_cache"
+	webresultNamespace = "web_result"
+)
+
 type fetcherStorage struct {
-	eridanus.StorageBackend
+	be eridanus.StorageBackend
 	http.CookieJar
 }
 
@@ -30,7 +35,7 @@ func (s *fetcherStorage) GetResults(u *url.URL) (*eridanus.ParseResults, error) 
 	hsh := fmt.Sprintf("%x", md5.Sum([]byte(u.String())))
 	rPath := fmt.Sprintf("%s/%s", webresultNamespace, hsh)
 	var r eridanus.ParseResults
-	rc, err := s.GetData(rPath)
+	rc, err := s.be.Get(rPath)
 	if err != nil {
 		return nil, err
 	}
@@ -48,13 +53,13 @@ func (s *fetcherStorage) GetResults(u *url.URL) (*eridanus.ParseResults, error) 
 func (s *fetcherStorage) SetResults(u *url.URL, r *eridanus.ParseResults) error {
 	hsh := fmt.Sprintf("%x", md5.Sum([]byte(u.String())))
 	rPath := fmt.Sprintf("%s/%s", webresultNamespace, hsh)
-	return s.SetData(rPath, strings.NewReader(proto.CompactTextString(r)))
+	return s.be.Set(rPath, strings.NewReader(proto.CompactTextString(r)))
 }
 
 func (s *fetcherStorage) GetCached(u *url.URL) (*http.Response, error) {
 	hsh := fmt.Sprintf("%x", md5.Sum([]byte(u.String())))
 	cPath := fmt.Sprintf("%s/%s", webcacheNamespace, hsh)
-	rc, err := s.GetData(cPath)
+	rc, err := s.be.Get(cPath)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +106,7 @@ func (s *fetcherStorage) SetCached(u *url.URL, res *http.Response) error {
 	fmt.Fprintf(buf, "%d\n%s", reqBuf.Len(), reqBuf.Bytes())
 	fmt.Fprintf(buf, "%d\n%s", resBuf.Len(), resBuf.Bytes())
 
-	return s.SetData(cPath, buf)
+	return s.be.Set(cPath, buf)
 }
 
 // Cookies implements the Cookies method of the http.CookieJar interface.

@@ -31,7 +31,7 @@ func (c *storageCache) keyTransform(key string) string {
 
 func (c *storageCache) Get(key string) ([]byte, bool) {
 	cPath := c.keyTransform(key)
-	rc, err := c.s.GetData(cPath)
+	rc, err := c.s.Get(cPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logrus.Error(err)
@@ -49,14 +49,14 @@ func (c *storageCache) Get(key string) ([]byte, bool) {
 
 func (c *storageCache) Set(key string, data []byte) {
 	cPath := c.keyTransform(key)
-	if err := c.s.SetData(cPath, bytes.NewReader(data)); err != nil {
+	if err := c.s.Set(cPath, bytes.NewReader(data)); err != nil {
 		logrus.Error(err)
 	}
 }
 
 func (c *storageCache) Delete(key string) {
 	cPath := c.keyTransform(key)
-	if err := c.s.DeleteData(cPath); err != nil && !os.IsNotExist(err) {
+	if err := c.s.Delete(cPath); err != nil && !os.IsNotExist(err) {
 		logrus.Error(err)
 	}
 }

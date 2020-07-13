@@ -1,4 +1,4 @@
-package storage
+package classes
 
 import (
 	"bytes"
@@ -8,6 +8,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/scytrin/eridanus"
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	classesBlobKey = "config/classes.yaml"
 )
 
 type classStorage struct {
@@ -21,7 +25,7 @@ func NewClassesStorage(be eridanus.StorageBackend) eridanus.ClassesStorage {
 }
 
 func (s *classStorage) load() error {
-	rc, err := s.be.GetData(classesBlobKey)
+	rc, err := s.be.Get(classesBlobKey)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -43,13 +47,13 @@ func (s *classStorage) save() error {
 	if err != nil {
 		return err
 	}
-	return s.be.SetData(classesBlobKey, bytes.NewReader(b))
+	return s.be.Set(classesBlobKey, bytes.NewReader(b))
 }
 
 // GetAll returns all current classifiers.
 func (s *classStorage) GetAll() ([]*eridanus.URLClass, error) {
 	var classes []*eridanus.URLClass
-	rc, err := s.be.GetData(classesBlobKey)
+	rc, err := s.be.Get(classesBlobKey)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return nil, err
@@ -77,7 +81,7 @@ func (s *classStorage) Add(c *eridanus.URLClass) error {
 	if err != nil {
 		return err
 	}
-	return s.be.SetData(parsersBlobKey, bytes.NewReader(pBytes))
+	return s.be.Set(classesBlobKey, bytes.NewReader(pBytes))
 }
 
 // GetByName returns the named classifier.

@@ -1,4 +1,4 @@
-package storage
+package content
 
 import (
 	"bytes"
@@ -13,17 +13,22 @@ import (
 	"github.com/scytrin/eridanus/idhash"
 )
 
-type contentStorage struct{ eridanus.StorageBackend }
+const (
+	contentNamespace   = "content"
+	thumbnailNamespace = "thumbnail"
+)
+
+type contentStorage struct{ be eridanus.StorageBackend }
 
 // NewContentStorage provides a new ContentStorage.
 func NewContentStorage(be eridanus.StorageBackend) eridanus.ContentStorage {
 	return &contentStorage{be}
 }
 
-// ContentKeys returns a list of all content item keys.
-func (s *contentStorage) ContentKeys() (eridanus.IDHashes, error) {
+// Keys returns a list of all content item keys.
+func (s *contentStorage) Keys() (eridanus.IDHashes, error) {
 	var idHashes eridanus.IDHashes
-	keys, err := s.Keys(contentNamespace)
+	keys, err := s.be.Keys(contentNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -33,14 +38,14 @@ func (s *contentStorage) ContentKeys() (eridanus.IDHashes, error) {
 	return idHashes, nil
 }
 
-// HasContent checks of the presence of content for the given hash.
-func (s *contentStorage) HasContent(idHash eridanus.IDHash) bool {
+// Has checks of the presence of content for the given hash.
+func (s *contentStorage) Has(idHash eridanus.IDHash) bool {
 	cPath := fmt.Sprintf("%s/%s", contentNamespace, idHash)
-	return s.HasData(cPath)
+	return s.be.Has(cPath)
 }
 
-// SetContent adds content, returning the hash.
-func (s *contentStorage) SetContent(r io.Reader) (out eridanus.IDHash, err error) {
+// Set adds content, returning the hash.
+func (s *contentStorage) Set(r io.Reader) (out eridanus.IDHash, err error) {
 	cBytes, err := ioutil.ReadAll(r)
 	if err != nil {
 		return "", err
@@ -52,17 +57,23 @@ func (s *contentStorage) SetContent(r io.Reader) (out eridanus.IDHash, err error
 	}
 
 	cPath := fmt.Sprintf("%s/%s", contentNamespace, idHash)
-	if err := s.SetData(cPath, bytes.NewReader(cBytes)); err != nil {
+	if err := s.be.Set(cPath, bytes.NewReader(cBytes)); err != nil {
 		return "", err
 	}
 
 	return idHash, nil
 }
 
+// Get provides a reader of the content for the given hash.
+func (s *contentStorage) Get(idHash eridanus.IDHash) (io.ReadCloser, error) {
+	cPath := fmt.Sprintf("%s/%s", contentNamespace, idHash)
+	return s.be.Get(cPath)
+}
+
 func (s *contentStorage) generateThumbnail(idHash eridanus.IDHash) (err error) {
 	defer eridanus.RecoveryHandler(func(e error) { err = e })
 
-	r, err := s.GetContent(idHash)
+	r, err := s.Get(idHash)
 	if err != nil {
 		return err
 	}
@@ -79,22 +90,16 @@ func (s *contentStorage) generateThumbnail(idHash eridanus.IDHash) (err error) {
 	}
 
 	tPath := fmt.Sprintf("%s/%s", thumbnailNamespace, idHash)
-	return s.SetData(tPath, tBuf)
+	return s.be.Set(tPath, tBuf)
 }
 
-// GetContent provides a reader of the content for the given hash.
-func (s *contentStorage) GetContent(idHash eridanus.IDHash) (io.ReadCloser, error) {
-	cPath := fmt.Sprintf("%s/%s", contentNamespace, idHash)
-	return s.GetData(cPath)
-}
-
-// GetThumbnail provides a reader of the thumbnail for the given hash.
-func (s *contentStorage) GetThumbnail(idHash eridanus.IDHash) (io.ReadCloser, error) {
+// Thumbnail provides a reader of the thumbnail for the given hash.
+func (s *contentStorage) Thumbnail(idHash eridanus.IDHash) (io.ReadCloser, error) {
 	tPath := fmt.Sprintf("%s/%s", thumbnailNamespace, idHash)
-	if !s.HasData(tPath) {
+	if !s.be.Has(tPath) {
 		if err := s.generateThumbnail(idHash); err != nil {
 			return nil, err
 		}
 	}
-	return s.GetData(tPath)
+	return s.be.Get(tPath)
 }

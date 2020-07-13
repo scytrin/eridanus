@@ -120,12 +120,14 @@ func (ts Tags) String() string {
 type StorageBackend interface {
 	GetRootPath() string
 	Close() error
-	Import(srcPath, key string, move bool) error
+
 	Keys(prefix string) ([]string, error)
-	SetData(key string, r io.Reader) error
-	HasData(key string) bool
-	GetData(key string) (io.ReadCloser, error)
-	DeleteData(key string) error
+	Set(key string, r io.Reader) error
+	Has(key string) bool
+	Get(key string) (io.ReadCloser, error)
+
+	Delete(key string) error
+	Import(srcPath, key string, move bool) error
 }
 
 // ClassesStorage stores classes.
@@ -146,20 +148,22 @@ type ParsersStorage interface {
 
 // TagStorage stores tags.
 type TagStorage interface {
-	TagKeys() (IDHashes, error)
-	SetTags(IDHash, Tags) error
-	HasTags(IDHash) bool
-	GetTags(IDHash) (Tags, error)
+	Keys() (IDHashes, error)
+	Set(IDHash, Tags) error
+	Has(IDHash) bool
+	Get(IDHash) (Tags, error)
+
 	FindByTags() (IDHashes, error)
 }
 
 // ContentStorage stores content.
 type ContentStorage interface {
-	ContentKeys() (IDHashes, error)
-	SetContent(io.Reader) (IDHash, error)
-	HasContent(IDHash) bool
-	GetContent(IDHash) (io.ReadCloser, error)
-	GetThumbnail(IDHash) (io.ReadCloser, error)
+	Keys() (IDHashes, error)
+	Set(io.Reader) (IDHash, error)
+	Has(IDHash) bool
+	Get(IDHash) (io.ReadCloser, error)
+
+	Thumbnail(IDHash) (io.ReadCloser, error)
 }
 
 // FetcherStorage stores web cache related data.

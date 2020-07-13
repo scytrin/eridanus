@@ -16,7 +16,7 @@ import (
 )
 
 func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptree.Comparable, error) {
-	tags, err := s.TagStorage().GetTags(idHash)
+	tags, err := s.TagStorage().Get(idHash)
 	if err != nil {
 		return nil, err
 	}
@@ -31,7 +31,7 @@ func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptre
 			return nil, errors.Errorf("no phash for %s, generation disallowed", idHash)
 		}
 
-		r, err := s.ContentStorage().GetContent(idHash)
+		r, err := s.ContentStorage().Get(idHash)
 		if err != nil {
 			return nil, err
 		}
@@ -42,7 +42,7 @@ func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptre
 		}
 
 		tags = append(tags, eridanus.Tag(fmt.Sprintf("phash:%s", pHash.ToString())))
-		if err := s.TagStorage().SetTags(idHash, tags); err != nil {
+		if err := s.TagStorage().Set(idHash, tags); err != nil {
 			return nil, err
 		}
 	}
@@ -155,7 +155,7 @@ func Find(s eridanus.Storage, targetIDHash eridanus.IDHash, effort int, maxDist 
 	if err != nil {
 		return nil, err
 	}
-	idHashes, err := s.ContentStorage().ContentKeys()
+	idHashes, err := s.ContentStorage().Keys()
 	if err != nil {
 		return nil, err
 	}

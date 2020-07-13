@@ -11,6 +11,11 @@ import (
 
 	"github.com/scytrin/eridanus"
 	"github.com/scytrin/eridanus/storage/backend"
+	"github.com/scytrin/eridanus/storage/classes"
+	"github.com/scytrin/eridanus/storage/content"
+	"github.com/scytrin/eridanus/storage/fetcher"
+	"github.com/scytrin/eridanus/storage/parsers"
+	"github.com/scytrin/eridanus/storage/tags"
 	"github.com/sirupsen/logrus"
 	_ "golang.org/x/image/bmp"      // image decoding
 	_ "golang.org/x/image/ccitt"    // image decoding
@@ -29,17 +34,11 @@ import (
 //yaml.v3 https://play.golang.org/p/H9WhcWSfJHT
 
 const (
-	cacheSize          = 1e6
-	queueLimit         = 1e3
-	tmbX, tmbY         = 150, 150
-	contentNamespace   = "content"
-	thumbnailNamespace = "thumbnail"
-	metadataNamespace  = "metadata"
-	webcacheNamespace  = "web_cache"
-	webresultNamespace = "web_result"
-	cookiesBlobKey     = "config/cookies.json"
-	classesBlobKey     = "config/classes.yaml"
-	parsersBlobKey     = "config/parsers.yaml"
+	cacheSize  = 1e6
+	queueLimit = 1e3
+	tmbX, tmbY = 150, 150
+
+	cookiesBlobKey = "config/cookies.json"
 )
 
 type storageItem struct {
@@ -76,7 +75,7 @@ func NewStorage(rootPath string) (*Storage, error) {
 	// }
 
 	if err := func() error { //cookie persistence
-		rc, err := s.GetData(cookiesBlobKey)
+		rc, err := s.Get(cookiesBlobKey)
 		if err != nil {
 			if !os.IsNotExist(err) {
 				return err
@@ -113,7 +112,7 @@ func (s *Storage) Close() error {
 		if err != nil {
 			return err
 		}
-		return s.SetData(cookiesBlobKey, bytes.NewReader(b))
+		return s.Set(cookiesBlobKey, bytes.NewReader(b))
 	}(); err != nil {
 		logrus.Error(err)
 	}
@@ -129,25 +128,25 @@ func (s *Storage) Close() error {
 
 // ClassesStorage provides a ClassesStorage.
 func (s *Storage) ClassesStorage() eridanus.ClassesStorage {
-	return NewClassesStorage(s.StorageBackend)
+	return classes.NewClassesStorage(s.StorageBackend)
 }
 
 // ParsersStorage provides a ParsersStorage.
 func (s *Storage) ParsersStorage() eridanus.ParsersStorage {
-	return NewParsersStorage(s.StorageBackend)
+	return parsers.NewParsersStorage(s.StorageBackend)
 }
 
 // TagStorage provides a TagStorage.
 func (s *Storage) TagStorage() eridanus.TagStorage {
-	return NewTagStorage(s.StorageBackend)
+	return tags.NewTagStorage(s.StorageBackend)
 }
 
 // ContentStorage provides a ContentStorage.
 func (s *Storage) ContentStorage() eridanus.ContentStorage {
-	return NewContentStorage(s.StorageBackend)
+	return content.NewContentStorage(s.StorageBackend)
 }
 
 // FetcherStorage provides a FetcherStorage.
 func (s *Storage) FetcherStorage() eridanus.FetcherStorage {
-	return NewFetcherStorage(s.StorageBackend, s.cookies)
+	return fetcher.NewFetcherStorage(s.StorageBackend, s.cookies)
 }

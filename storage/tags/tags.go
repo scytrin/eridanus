@@ -1,4 +1,4 @@
-package storage
+package tags
 
 import (
 	"fmt"
@@ -10,7 +10,11 @@ import (
 	"github.com/scytrin/eridanus"
 )
 
-type tagStorage struct{ eridanus.StorageBackend }
+const (
+	metadataNamespace = "metadata"
+)
+
+type tagStorage struct{ be eridanus.StorageBackend }
 
 // NewTagStorage provides a new TagStorage.
 func NewTagStorage(be eridanus.StorageBackend) eridanus.TagStorage {
@@ -18,9 +22,9 @@ func NewTagStorage(be eridanus.StorageBackend) eridanus.TagStorage {
 }
 
 // TagKeys returns a list of all tag item keys.
-func (s *tagStorage) TagKeys() (eridanus.IDHashes, error) {
+func (s *tagStorage) Keys() (eridanus.IDHashes, error) {
 	var idHashes eridanus.IDHashes
-	keys, err := s.Keys(metadataNamespace)
+	keys, err := s.be.Keys(metadataNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -31,9 +35,9 @@ func (s *tagStorage) TagKeys() (eridanus.IDHashes, error) {
 }
 
 // GetTags provides a string slice of tags for the given hash.
-func (s *tagStorage) GetTags(idHash eridanus.IDHash) (eridanus.Tags, error) {
+func (s *tagStorage) Get(idHash eridanus.IDHash) (eridanus.Tags, error) {
 	mPath := fmt.Sprintf("%s/%s", metadataNamespace, idHash)
-	r, err := s.GetData(mPath)
+	r, err := s.be.Get(mPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -53,28 +57,28 @@ func (s *tagStorage) GetTags(idHash eridanus.IDHash) (eridanus.Tags, error) {
 }
 
 // HasTags indicates if tags exist for the given hash.
-func (s *tagStorage) HasTags(idHash eridanus.IDHash) bool {
+func (s *tagStorage) Has(idHash eridanus.IDHash) bool {
 	mPath := fmt.Sprintf("%s/%s", metadataNamespace, idHash)
-	return s.StorageBackend.HasData(mPath)
+	return s.be.Has(mPath)
 }
 
 // SetTags sets a string slice of tags for the given hash.
-func (s *tagStorage) SetTags(idHash eridanus.IDHash, newTags eridanus.Tags) error {
+func (s *tagStorage) Set(idHash eridanus.IDHash, newTags eridanus.Tags) error {
 	mPath := fmt.Sprintf("%s/%s", metadataNamespace, idHash)
 	tagStr := newTags.OmitDuplicates().String()
-	return s.SetData(mPath, strings.NewReader(tagStr))
+	return s.be.Set(mPath, strings.NewReader(tagStr))
 }
 
 // Find searches through tags for matches.
 func (s *tagStorage) FindByTags() (eridanus.IDHashes, error) {
 	var idHashes eridanus.IDHashes
-	keys, err := s.Keys(metadataNamespace)
+	keys, err := s.be.Keys(metadataNamespace)
 	if err != nil {
 		return nil, err
 	}
 	for _, mPath := range keys {
 		idHash := eridanus.IDHash(filepath.Base(mPath))
-		tags, err := s.GetTags(idHash)
+		tags, err := s.Get(idHash)
 		if err != nil {
 			return nil, err
 		}

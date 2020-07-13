@@ -1,4 +1,4 @@
-package storage
+package parsers
 
 import (
 	"bytes"
@@ -8,6 +8,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/scytrin/eridanus"
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	parsersBlobKey = "config/parsers.yaml"
 )
 
 type parsersStorage struct {
@@ -22,7 +26,7 @@ func NewParsersStorage(be eridanus.StorageBackend) eridanus.ParsersStorage {
 // GetAllParsers returns all current parsers.
 func (s *parsersStorage) GetAll() ([]*eridanus.Parser, error) {
 	var parsers []*eridanus.Parser
-	rc, err := s.be.GetData(parsersBlobKey)
+	rc, err := s.be.Get(parsersBlobKey)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return nil, err
@@ -50,7 +54,7 @@ func (s *parsersStorage) Add(p *eridanus.Parser) error {
 	if err != nil {
 		return err
 	}
-	return s.be.SetData(parsersBlobKey, bytes.NewReader(pBytes))
+	return s.be.Set(parsersBlobKey, bytes.NewReader(pBytes))
 }
 
 // GetByName returns the named parser.

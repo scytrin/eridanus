@@ -407,14 +407,14 @@ func (f *Fetcher) handleResponse(fbCtx *fetchbot.Context, res *http.Response, er
 		}
 	}
 
-	idHash, err := f.ds.SetContent(res.Body)
+	idHash, err := f.ds.Set(res.Body)
 	if err != nil {
 		log.Error(err)
 		return
 	}
 	log = logrus.WithField("h", idHash)
 
-	tags, err := f.ts.GetTags(eridanus.IDHash(idHash))
+	tags, err := f.ts.Get(eridanus.IDHash(idHash))
 	if err != nil {
 		log.Error(err)
 		return
@@ -422,7 +422,7 @@ func (f *Fetcher) handleResponse(fbCtx *fetchbot.Context, res *http.Response, er
 
 	tags = append(tags, eridanus.Tag(fmt.Sprintf("source:%s", ru)))
 
-	if err := f.ts.SetTags(eridanus.IDHash(idHash), tags); err != nil {
+	if err := f.ts.Set(eridanus.IDHash(idHash), tags); err != nil {
 		log.Error(err)
 		return
 	}
