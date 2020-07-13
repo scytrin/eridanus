@@ -132,34 +132,36 @@ type StorageBackend interface {
 
 // ClassesStorage stores classes.
 type ClassesStorage interface {
-	Add(*URLClass) error
-	GetAll() ([]*URLClass, error)
+	Names() ([]string, error)
+	Put(*URLClass) error
+	Has(string) bool
 	Get(string) (*URLClass, error)
 	For(*url.URL) (*URLClass, error)
 }
 
 // ParsersStorage stores parsers.
 type ParsersStorage interface {
-	Add(*Parser) error
-	GetAll() ([]*Parser, error)
+	Names() ([]string, error)
+	Put(*Parser) error
+	Has(string) bool
 	Get(string) (*Parser, error)
 	For(*URLClass) ([]*Parser, error)
 }
 
 // TagStorage stores tags.
 type TagStorage interface {
-	Keys() (IDHashes, error)
-	Set(IDHash, Tags) error
+	Hashes() (IDHashes, error)
+	Put(IDHash, Tags) error
 	Has(IDHash) bool
 	Get(IDHash) (Tags, error)
 
-	FindByTags() (IDHashes, error)
+	Find() (IDHashes, error)
 }
 
 // ContentStorage stores content.
 type ContentStorage interface {
-	Keys() (IDHashes, error)
-	Set(io.Reader) (IDHash, error)
+	Hashes() (IDHashes, error)
+	Put(io.Reader) (IDHash, error)
 	Has(IDHash) bool
 	Get(IDHash) (io.ReadCloser, error)
 

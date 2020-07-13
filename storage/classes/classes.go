@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/scytrin/eridanus"
@@ -12,7 +13,6 @@ import (
 
 const (
 	classesNamespace = "classes"
-	classesBlobKey   = "config/classes.yaml"
 )
 
 type classStorage struct{ be eridanus.StorageBackend }
@@ -22,19 +22,31 @@ func NewClassesStorage(be eridanus.StorageBackend) eridanus.ClassesStorage {
 	return &classStorage{be}
 }
 
-// Keys returns a list of all class names.
-func (s *classStorage) Keys() ([]string, error) {
-	return s.be.Keys(classesNamespace)
+// Names returns a list of all class names.
+func (s *classStorage) Names() ([]string, error) {
+	keys, err := s.be.Keys(classesNamespace)
+	if err != nil {
+		return nil, err
+	}
+	for i, k := range keys {
+		keys[i] = strings.TrimPrefix(k, classesNamespace+"/")
+	}
+	return keys, nil
 }
 
-// Add adds a classifier.
-func (s *classStorage) Add(c *eridanus.URLClass) error {
+// Put adds a classifier.
+func (s *classStorage) Put(c *eridanus.URLClass) error {
 	cPath := fmt.Sprintf("%s/%s", classesNamespace, c.GetName())
 	buf := bytes.NewBuffer(nil)
 	if err := yaml.NewEncoder(buf).Encode(c); err != nil {
 		return err
 	}
 	return s.be.Set(cPath, buf)
+}
+
+func (s *classStorage) Has(name string) bool {
+	cPath := fmt.Sprintf("%s/%s", classesNamespace, name)
+	return s.be.Has(cPath)
 }
 
 // Get returns the named classifier.

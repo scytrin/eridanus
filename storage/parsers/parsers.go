@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/scytrin/eridanus"
 	"gopkg.in/yaml.v3"
@@ -11,7 +12,6 @@ import (
 
 const (
 	parsersNamespace = "parsers"
-	parsersBlobKey   = "config/parsers.yaml"
 )
 
 type parsersStorage struct{ be eridanus.StorageBackend }
@@ -21,19 +21,31 @@ func NewParsersStorage(be eridanus.StorageBackend) eridanus.ParsersStorage {
 	return &parsersStorage{be}
 }
 
-// Keys returns a list of all parser names.
-func (s *parsersStorage) Keys() ([]string, error) {
-	return s.be.Keys(parsersNamespace)
+// Names returns a list of all parser names.
+func (s *parsersStorage) Names() ([]string, error) {
+	keys, err := s.be.Keys(parsersNamespace)
+	if err != nil {
+		return nil, err
+	}
+	for i, k := range keys {
+		keys[i] = strings.TrimPrefix(k, parsersNamespace+"/")
+	}
+	return keys, nil
 }
 
-// AddParser adds a parser.
-func (s *parsersStorage) Add(p *eridanus.Parser) error {
+// Put adds a parser.
+func (s *parsersStorage) Put(p *eridanus.Parser) error {
 	pPath := fmt.Sprintf("%s/%s", parsersNamespace, p.GetName())
 	buf := bytes.NewBuffer(nil)
 	if err := yaml.NewEncoder(buf).Encode(p); err != nil {
 		return err
 	}
 	return s.be.Set(pPath, buf)
+}
+
+func (s *parsersStorage) Has(name string) bool {
+	pPath := fmt.Sprintf("%s/%s", parsersNamespace, name)
+	return s.be.Has(pPath)
 }
 
 // Get returns the named parser.

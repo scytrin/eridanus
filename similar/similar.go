@@ -42,7 +42,7 @@ func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptre
 		}
 
 		tags = append(tags, eridanus.Tag(fmt.Sprintf("phash:%s", pHash.ToString())))
-		if err := s.TagStorage().Set(idHash, tags); err != nil {
+		if err := s.TagStorage().Put(idHash, tags); err != nil {
 			return nil, err
 		}
 	}
@@ -155,7 +155,7 @@ func Find(s eridanus.Storage, targetIDHash eridanus.IDHash, effort int, maxDist 
 	if err != nil {
 		return nil, err
 	}
-	idHashes, err := s.ContentStorage().Keys()
+	idHashes, err := s.ContentStorage().Hashes()
 	if err != nil {
 		return nil, err
 	}

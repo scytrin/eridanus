@@ -33,13 +33,45 @@ import (
 
 var maxWorkers = 10
 
+func getAllClasses(s eridanus.ClassesStorage) (vs []*eridanus.URLClass, err error) {
+	names, err := s.Names()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, name := range names {
+		v, err := s.Get(name)
+		if err != nil {
+			return nil, err
+		}
+		vs = append(vs, v)
+	}
+	return
+}
+
+func getAllParsers(s eridanus.ParsersStorage) (vs []*eridanus.Parser, err error) {
+	names, err := s.Names()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, name := range names {
+		v, err := s.Get(name)
+		if err != nil {
+			return nil, err
+		}
+		vs = append(vs, v)
+	}
+	return
+}
+
 func buildClassParserMap(s eridanus.Storage) map[*eridanus.URLClass][]*eridanus.Parser {
-	classes, err := s.ClassesStorage().GetAll()
+	classes, err := getAllClasses(s.ClassesStorage())
 	if err != nil {
 		return nil
 	}
 
-	parsers, err := s.ParsersStorage().GetAll()
+	parsers, err := getAllParsers(s.ParsersStorage())
 	if err != nil {
 		return nil
 	}
@@ -209,7 +241,7 @@ func (f *Fetcher) parse(ctx context.Context, req *http.Request, res *http.Respon
 	log.Info("parsing...")
 	ru := res.Request.URL
 
-	classes, err := f.cs.GetAll()
+	classes, err := getAllClasses(f.cs)
 	if err != nil {
 		return err
 	}
@@ -297,7 +329,7 @@ func (f *Fetcher) parseResponse(fbCtx *fetchbot.Context, res *http.Response, err
 	log.Info("parsing...")
 	ru := res.Request.URL
 
-	classes, err := f.cs.GetAll()
+	classes, err := getAllClasses(f.cs)
 	if err != nil {
 		log.Debug(err)
 		return
@@ -388,7 +420,7 @@ func (f *Fetcher) handleResponse(fbCtx *fetchbot.Context, res *http.Response, er
 	log.Info("handling...")
 	ru := res.Request.URL
 
-	classes, err := f.cs.GetAll()
+	classes, err := getAllClasses(f.cs)
 	if err != nil {
 		log.Debug(err)
 		return
@@ -407,7 +439,7 @@ func (f *Fetcher) handleResponse(fbCtx *fetchbot.Context, res *http.Response, er
 		}
 	}
 
-	idHash, err := f.ds.Set(res.Body)
+	idHash, err := f.ds.Put(res.Body)
 	if err != nil {
 		log.Error(err)
 		return
@@ -422,7 +454,7 @@ func (f *Fetcher) handleResponse(fbCtx *fetchbot.Context, res *http.Response, er
 
 	tags = append(tags, eridanus.Tag(fmt.Sprintf("source:%s", ru)))
 
-	if err := f.ts.Set(eridanus.IDHash(idHash), tags); err != nil {
+	if err := f.ts.Put(eridanus.IDHash(idHash), tags); err != nil {
 		log.Error(err)
 		return
 	}

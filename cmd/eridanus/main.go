@@ -84,9 +84,18 @@ func main() {
 				return err
 			}
 
-			classes, err := s.ClassesStorage().GetAll()
+			classNames, err := s.ClassesStorage().Names()
 			if err != nil {
 				return err
+			}
+
+			var classes []*eridanus.URLClass
+			for _, name := range classNames {
+				cls, err := s.ClassesStorage().Get(name)
+				if err != nil {
+					return err
+				}
+				classes = append(classes, cls)
 			}
 
 			cmd := &eridanus.Command{Cmd: "classes"}

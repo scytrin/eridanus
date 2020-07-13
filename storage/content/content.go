@@ -25,8 +25,8 @@ func NewContentStorage(be eridanus.StorageBackend) eridanus.ContentStorage {
 	return &contentStorage{be}
 }
 
-// Keys returns a list of all content item keys.
-func (s *contentStorage) Keys() (eridanus.IDHashes, error) {
+// Hashes returns a list of all content item keys.
+func (s *contentStorage) Hashes() (eridanus.IDHashes, error) {
 	var idHashes eridanus.IDHashes
 	keys, err := s.be.Keys(contentNamespace)
 	if err != nil {
@@ -44,8 +44,8 @@ func (s *contentStorage) Has(idHash eridanus.IDHash) bool {
 	return s.be.Has(cPath)
 }
 
-// Set adds content, returning the hash.
-func (s *contentStorage) Set(r io.Reader) (out eridanus.IDHash, err error) {
+// Put adds content, returning the hash.
+func (s *contentStorage) Put(r io.Reader) (out eridanus.IDHash, err error) {
 	cBytes, err := ioutil.ReadAll(r)
 	if err != nil {
 		return "", err
