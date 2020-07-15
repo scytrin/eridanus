@@ -4,6 +4,7 @@ package eridanus
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -40,6 +41,13 @@ var (
 
 // IDHash is a key for identifying an item.
 type IDHash string
+
+// GenerateIDHash returns a hashsum that will be used to identify the content.
+func GenerateIDHash(r io.Reader) (IDHash, error) {
+	h := sha256.New()
+	io.Copy(h, r)
+	return IDHash(fmt.Sprintf("%x", h.Sum(nil))), nil
+}
 
 func (h IDHash) String() string {
 	return string(h)

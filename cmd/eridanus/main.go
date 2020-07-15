@@ -87,7 +87,7 @@ func jsonCmdHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Info(req)
 
-	res := &eridanus.Command{Cmd: "halo"} // do stuff
+	res := &eridanus.Command{Cmd: "okay"} // do stuff
 	if err := json.NewEncoder(w).Encode(res); err != nil {
 		log.Error(err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

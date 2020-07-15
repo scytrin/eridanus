@@ -10,7 +10,6 @@ import (
 
 	"github.com/nfnt/resize"
 	"github.com/scytrin/eridanus"
-	"github.com/scytrin/eridanus/idhash"
 )
 
 const (
@@ -51,7 +50,7 @@ func (s *contentStorage) Put(r io.Reader) (out eridanus.IDHash, err error) {
 		return "", err
 	}
 
-	idHash, err := idhash.GenerateIDHash(bytes.NewReader(cBytes))
+	idHash, err := eridanus.GenerateIDHash(bytes.NewReader(cBytes))
 	if err != nil {
 		return "", err
 	}
