@@ -7,6 +7,7 @@ import (
 
 	"github.com/peterbourgon/diskv/v3"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
 )
 
 func keyToPathKey(key string) *diskv.PathKey {
@@ -23,13 +24,14 @@ func pathKeyToKey(pk *diskv.PathKey) string {
 
 // Backend provides a diskv storage backend.
 type Backend struct {
-	kv *diskv.Diskv
+	kv      *diskv.Diskv
+	closers []func() error
 }
 
 // NewBackend provides a new backend instance.
 func NewBackend(rootPath string) *Backend {
-	return &Backend{diskv.New(diskv.Options{
-		BasePath:          filepath.Join(rootPath, "kv"),
+	return &Backend{kv: diskv.New(diskv.Options{
+		BasePath:          filepath.Join(rootPath),
 		AdvancedTransform: keyToPathKey,
 		InverseTransform:  pathKeyToKey,
 		Compression:       nil,
@@ -39,6 +41,11 @@ func NewBackend(rootPath string) *Backend {
 	})}
 }
 
+// RegisterOnClose adds an item to run at close time.
+func (be *Backend) RegisterOnClose(closer func() error) {
+	be.closers = append(be.closers, closer)
+}
+
 // GetRootPath returns the filepath location of on disk storage.
 func (be *Backend) GetRootPath() string {
 	return be.kv.BasePath
@@ -46,7 +53,11 @@ func (be *Backend) GetRootPath() string {
 
 // Close closes any open items.
 func (be *Backend) Close() error {
-	return nil
+	errg := &errgroup.Group{}
+	for _, closer := range be.closers {
+		errg.Go(closer)
+	}
+	return errg.Wait()
 }
 
 // Import ingests a file on the local filesystem and stores it at the specified key.

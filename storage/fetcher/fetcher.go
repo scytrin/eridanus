@@ -8,27 +8,62 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"strings"
 
+	"github.com/go-playground/log"
 	"github.com/golang/protobuf/proto"
 	"github.com/scytrin/eridanus"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/publicsuffix"
+	"gopkg.in/yaml.v2"
 )
 
 const (
+	cookiesBlobKey     = "config/cookies.json"
 	webcacheNamespace  = "web_cache"
 	webresultNamespace = "web_result"
 )
 
 type fetcherStorage struct {
-	be eridanus.StorageBackend
-	http.CookieJar
+	be      eridanus.StorageBackend
+	cookies *Jar
 }
 
 // NewFetcherStorage provides a new FetcherStorage.
-func NewFetcherStorage(be eridanus.StorageBackend, cookies http.CookieJar) eridanus.FetcherStorage {
-	return &fetcherStorage{be, cookies}
+func NewFetcherStorage(be eridanus.StorageBackend) eridanus.FetcherStorage {
+	cookies, _ := NewCookieJar(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	s := &fetcherStorage{be, cookies}
+
+	if err := func() error { //cookie persistence
+		rc, err := be.Get(cookiesBlobKey)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}
+		defer rc.Close()
+		if err := yaml.NewDecoder(rc).Decode(&s.cookies.entries); err != nil {
+			return err
+		}
+		return nil
+	}(); err != nil {
+		log.Warn(err)
+	}
+
+	be.RegisterOnClose(s.Close)
+	return s
+}
+
+func (s *fetcherStorage) Close() error {
+	b, err := yaml.Marshal(s.cookies.entries)
+	if err != nil {
+		return err
+	}
+	return s.be.Set(cookiesBlobKey, bytes.NewReader(b))
 }
 
 func (s *fetcherStorage) GetResults(u *url.URL) (*eridanus.ParseResults, error) {
@@ -111,7 +146,7 @@ func (s *fetcherStorage) SetCached(u *url.URL, res *http.Response) error {
 
 // Cookies implements the Cookies method of the http.CookieJar interface.
 func (s *fetcherStorage) Cookies(u *url.URL) []*http.Cookie {
-	cookies := s.Cookies(u)
+	cookies := s.cookies.Cookies(u)
 	logrus.WithField("cookie", "get").WithField("url", u).Debug(cookies)
 	return cookies
 }
@@ -119,5 +154,5 @@ func (s *fetcherStorage) Cookies(u *url.URL) []*http.Cookie {
 // SetCookies implements the SetCookies method of the http.CookieJar interface.
 func (s *fetcherStorage) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	logrus.WithField("cookie", "set").WithField("url", u).Debug(cookies)
-	s.SetCookies(u, cookies)
+	s.cookies.SetCookies(u, cookies)
 }

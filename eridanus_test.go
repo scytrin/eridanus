@@ -26,7 +26,7 @@ func TestGenerateIDHash(t *testing.T) {
 			if err != nil {
 				t.Errorf("GenerateIDHash(r): got %v, want nil", err)
 			}
-			if idhash != eridanus.IDHash(h) {
+			if idhash != IDHash(h) {
 				t.Errorf("GenerateIDHash(r): got %x, want %x", idhash, h)
 			}
 			color := idhash.HexColor()

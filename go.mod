@@ -6,6 +6,8 @@ require (
 	github.com/PuerkitoBio/fetchbot v1.2.0
 	github.com/alitto/pond v1.4.0
 	github.com/corona10/goimagehash v1.0.2
+	github.com/go-playground/errors v3.3.0+incompatible // indirect
+	github.com/go-playground/log v6.3.0+incompatible
 	github.com/golang/protobuf v1.4.2
 	github.com/google/go-cmp v0.5.0
 	github.com/grpc-ecosystem/go-grpc-middleware v1.2.0 // indirect
@@ -32,5 +34,6 @@ require (
 	google.golang.org/protobuf v1.24.0
 	gopkg.in/check.v1 v1.0.0-20200227125254-8fa46927fb4f // indirect
 	gopkg.in/xmlpath.v2 v2.0.0-20150820204837-860cbeca3ebc
+	gopkg.in/yaml.v2 v2.2.2
 	gopkg.in/yaml.v3 v3.0.0-20200615113413-eeeca48fe776
 )

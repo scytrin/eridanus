@@ -127,6 +127,7 @@ func (ts Tags) String() string {
 // StorageBackend powers Storage.
 type StorageBackend interface {
 	GetRootPath() string
+	RegisterOnClose(func() error)
 	Close() error
 
 	Keys(prefix string) ([]string, error)

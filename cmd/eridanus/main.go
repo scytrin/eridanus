@@ -16,6 +16,7 @@ import (
 	"github.com/scytrin/eridanus"
 	"github.com/scytrin/eridanus/fetcher"
 	"github.com/scytrin/eridanus/storage"
+	"github.com/scytrin/eridanus/storage/backend/diskv"
 	"github.com/sirupsen/logrus"
 )
 
@@ -50,11 +51,13 @@ func main() {
 	ctx, cancel := context.WithCancel(ctxlogrus.ToContext(context.Background(), logrus.NewEntry(log)))
 	defer cancel()
 
-	s, err := storage.NewStorage(*persistPath)
+	sbe := diskv.NewBackend(*persistPath)
+	defer sbe.Close()
+
+	s, err := storage.NewStorage(sbe)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer s.Close()
 
 	f, err := fetcher.NewFetcher(s)
 	if err != nil {

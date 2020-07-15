@@ -15,8 +15,8 @@ import (
 	"gonum.org/v1/gonum/spatial/vptree"
 )
 
-func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptree.Comparable, error) {
-	tags, err := s.TagStorage().Get(idHash)
+func buildHash(ts eridanus.TagStorage, cs eridanus.ContentStorage, idHash eridanus.IDHash, generate bool) (vptree.Comparable, error) {
+	tags, err := ts.Get(idHash)
 	if err != nil {
 		return nil, err
 	}
@@ -31,7 +31,7 @@ func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptre
 			return nil, errors.Errorf("no phash for %s, generation disallowed", idHash)
 		}
 
-		r, err := s.ContentStorage().Get(idHash)
+		r, err := cs.Get(idHash)
 		if err != nil {
 			return nil, err
 		}
@@ -42,19 +42,19 @@ func buildHash(s eridanus.Storage, idHash eridanus.IDHash, generate bool) (vptre
 		}
 
 		tags = append(tags, eridanus.Tag(fmt.Sprintf("phash:%s", pHash.ToString())))
-		if err := s.TagStorage().Put(idHash, tags); err != nil {
+		if err := ts.Put(idHash, tags); err != nil {
 			return nil, err
 		}
 	}
 	return nil, nil
 }
 
-func buildHashes(s eridanus.Storage, idHashes eridanus.IDHashes, generate bool) ([]vptree.Comparable, error) {
+func buildHashes(ts eridanus.TagStorage, cs eridanus.ContentStorage, idHashes eridanus.IDHashes, generate bool) ([]vptree.Comparable, error) {
 	hashStart := time.Now()
 	var hashes []vptree.Comparable
 
 	for _, idHash := range idHashes {
-		compHash, err := buildHash(s, idHash, generate)
+		compHash, err := buildHash(ts, cs, idHash, generate)
 		if err != nil {
 			logrus.Error(err)
 			continue
@@ -150,16 +150,16 @@ func findSimilar(tree *vptree.Tree, target vptree.Comparable, maxDist float64) m
 }
 
 // Find returns a map of idHash to perceptive distance from the specified target.
-func Find(s eridanus.Storage, targetIDHash eridanus.IDHash, effort int, maxDist float64, generate bool) (map[eridanus.IDHash]float64, error) {
-	target, err := buildHash(s, targetIDHash, generate)
+func Find(ts eridanus.TagStorage, cs eridanus.ContentStorage, targetIDHash eridanus.IDHash, effort int, maxDist float64, generate bool) (map[eridanus.IDHash]float64, error) {
+	target, err := buildHash(ts, cs, targetIDHash, generate)
 	if err != nil {
 		return nil, err
 	}
-	idHashes, err := s.ContentStorage().Hashes()
+	idHashes, err := cs.Hashes()
 	if err != nil {
 		return nil, err
 	}
-	hashes, err := buildHashes(s, idHashes, generate)
+	hashes, err := buildHashes(ts, cs, idHashes, generate)
 	if err != nil {
 		return nil, err
 	}
