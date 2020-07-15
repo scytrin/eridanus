@@ -74,6 +74,12 @@ func main() {
 		if err := httpServer.Shutdown(ctx); err != nil {
 			log.Error(err)
 		}
+		if err := f.Close(); err != nil {
+			log.Error(err)
+		}
+		if err := sbe.Close(); err != nil {
+			log.Error(err)
+		}
 	}()
 	log.Fatal(httpServer.ListenAndServe())
 }

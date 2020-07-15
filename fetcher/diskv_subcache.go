@@ -14,7 +14,7 @@ import (
 var webcacheNamespace = "web_cache2"
 
 type storageCache struct {
-	s eridanus.Storage
+	s eridanus.StorageBackend
 }
 
 func (c *storageCache) keyTransform(key string) string {

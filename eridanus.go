@@ -188,7 +188,7 @@ type FetcherStorage interface {
 
 // Storage manages data.
 type Storage interface {
-	StorageBackend
+	Backend() StorageBackend
 	ClassesStorage() ClassesStorage
 	ParsersStorage() ParsersStorage
 	TagStorage() TagStorage

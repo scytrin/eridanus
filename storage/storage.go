@@ -32,36 +32,39 @@ const (
 )
 
 // Storage provides a default implementation of eridanus.Storage.
-type Storage struct {
-	eridanus.StorageBackend
-}
+type Storage struct{ be eridanus.StorageBackend }
 
 // NewStorage provides a new instance implementing Storage.
 func NewStorage(be eridanus.StorageBackend) (*Storage, error) {
-	return &Storage{StorageBackend: be}, nil
+	return &Storage{be}, nil
+}
+
+// Backend provides the StorageBackend.
+func (s *Storage) Backend() eridanus.StorageBackend {
+	return s.be
 }
 
 // ClassesStorage provides a ClassesStorage.
 func (s *Storage) ClassesStorage() eridanus.ClassesStorage {
-	return classes.NewClassesStorage(s.StorageBackend)
+	return classes.NewClassesStorage(s.be)
 }
 
 // ParsersStorage provides a ParsersStorage.
 func (s *Storage) ParsersStorage() eridanus.ParsersStorage {
-	return parsers.NewParsersStorage(s.StorageBackend)
+	return parsers.NewParsersStorage(s.be)
 }
 
 // TagStorage provides a TagStorage.
 func (s *Storage) TagStorage() eridanus.TagStorage {
-	return tags.NewTagStorage(s.StorageBackend)
+	return tags.NewTagStorage(s.be)
 }
 
 // ContentStorage provides a ContentStorage.
 func (s *Storage) ContentStorage() eridanus.ContentStorage {
-	return content.NewContentStorage(s.StorageBackend)
+	return content.NewContentStorage(s.be)
 }
 
 // FetcherStorage provides a FetcherStorage.
 func (s *Storage) FetcherStorage() eridanus.FetcherStorage {
-	return fetcher.NewFetcherStorage(s.StorageBackend)
+	return fetcher.NewFetcherStorage(s.be)
 }
