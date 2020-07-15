@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 
 	"github.com/improbable-eng/go-httpwares/logging/logrus/ctxlogrus"
 	"github.com/nullseed/logruseq"
@@ -41,47 +42,54 @@ func init() {
 func main() {
 	log := logrus.StandardLogger()
 	defer log.Info("DONE!!!!!")
-	fmt.Println("hi")
-	log.Info(os.Args)
-
-	appPort := flag.Int("port", 39485, "")
-	persistPath := flag.String("persist", `Z:\EridanusStore`, "")
-	flag.Parse()
 
 	ctx, cancel := context.WithCancel(ctxlogrus.ToContext(context.Background(), logrus.NewEntry(log)))
-	defer cancel()
+	logrus.DeferExitHandler(cancel)
+
+	go func() {
+		c := make(chan os.Signal)
+		defer close(c)
+		signal.Notify(c, os.Interrupt, os.Kill)
+		defer signal.Stop(c)
+		log.Infof("got signal: %v", <-c)
+		log.Exit(0)
+	}()
+
+	persistPath := flag.String("persist", `Z:\EridanusStore`, "")
+	appPort := flag.Int("port", 39485, "")
+	flag.Parse()
 
 	sbe := diskv.NewBackend(*persistPath)
-	defer sbe.Close()
+	logrus.DeferExitHandler(func() {
+		if err := sbe.Close(); err != nil {
+			log.Error(err)
+		}
+	})
 
-	s, err := storage.NewStorage(sbe)
-	if err != nil {
-		log.Fatal(err)
-	}
-
+	s := storage.NewStorage(sbe)
 	f, err := fetcher.NewFetcher(s)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer f.Close()
+	logrus.DeferExitHandler(func() {
+		if err := f.Close(); err != nil {
+			log.Error(err)
+		}
+	})
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", *appPort),
 		Handler: http.HandlerFunc(jsonCmdHandler),
 	}
-	go func() {
-		<-ctx.Done()
+	logrus.DeferExitHandler(func() {
 		if err := httpServer.Shutdown(ctx); err != nil {
 			log.Error(err)
 		}
-		if err := f.Close(); err != nil {
-			log.Error(err)
-		}
-		if err := sbe.Close(); err != nil {
-			log.Error(err)
-		}
-	}()
-	log.Fatal(httpServer.ListenAndServe())
+	})
+
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Error(err)
+	}
 }
 
 func jsonCmdHandler(w http.ResponseWriter, r *http.Request) {

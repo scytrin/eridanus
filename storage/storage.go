@@ -35,8 +35,8 @@ const (
 type Storage struct{ be eridanus.StorageBackend }
 
 // NewStorage provides a new instance implementing Storage.
-func NewStorage(be eridanus.StorageBackend) (*Storage, error) {
-	return &Storage{be}, nil
+func NewStorage(be eridanus.StorageBackend) *Storage {
+	return &Storage{be}
 }
 
 // Backend provides the StorageBackend.
