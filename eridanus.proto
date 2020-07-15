@@ -10,6 +10,10 @@ message Command {
   map<string, string> kv = 3;
 }
 
+message Commands {
+  repeated Command commands = 1;
+}
+
 message StringMatcher {
   enum MatcherType {
     EXACT = 0;
