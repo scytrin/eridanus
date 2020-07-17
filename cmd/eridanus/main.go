@@ -96,7 +96,7 @@ func jsonCmdHandler(w http.ResponseWriter, r *http.Request) {
 	log := logrus.StandardLogger()
 	defer r.Body.Close()
 
-	req := &eridanus.Command{}
+	var req interface{}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Error(err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -104,7 +104,8 @@ func jsonCmdHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Info(req)
 
-	res := &eridanus.Command{Cmd: "okay"} // do stuff
+	var res interface{}
+	res = &eridanus.Command{Cmd: "okay"} // do stuff
 	if err := json.NewEncoder(w).Encode(res); err != nil {
 		log.Error(err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

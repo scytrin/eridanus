@@ -29,8 +29,41 @@ const (
 
 var (
 	client          = &http.Client{Timeout: 5 * time.Second}
+	endianess       = binary.LittleEndian
 	msgSizeBytesLen = binary.Size(uint32(0))
 )
+
+type message struct {
+	Commands []*eridanus.Command `json:",omitempty"`
+}
+
+func (m message) MarshalBinary() ([]byte, error) {
+	w := bytes.NewBuffer(nil)
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	if err := binary.Write(w, endianess, uint32(len(out))); err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(out); err != nil {
+		return nil, err
+	}
+	return w.Bytes(), nil
+}
+
+func (m *message) UnmarshalBinary(data []byte) error {
+	r := bytes.NewReader(data)
+	length := uint32(0)
+	if err := binary.Read(r, endianess, &length); err != nil {
+		return err
+	}
+	payload := make([]byte, length)
+	if _, err := r.Read(payload); err != nil {
+		return err
+	}
+	return json.Unmarshal(payload, m)
+}
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -49,100 +82,39 @@ func main() {
 		return
 	}
 
-	if err := run(os.Stdin, os.Stdout, fmt.Sprintf("http://localhost:%d", *appPort)); err != nil {
+	srvAddr := fmt.Sprintf("http://localhost:%d", *appPort)
+	if err := run(ctx, os.Stdin, os.Stdout, srvAddr); err != nil && err != io.EOF {
 		log.Fatal(err)
 	}
 }
 
-func run(r io.Reader, w io.Writer, appURL string) error {
+func run(ctx context.Context, r io.Reader, w io.Writer, appURL string) error {
 	for {
-		cmds, err := Get(r)
+		// get query length
+		qLen := uint32(0)
+		if err := binary.Read(r, binary.LittleEndian, &qLen); err != nil {
+			return err
+		}
+		// forward the query to the main app
+		res, err := client.Post(appURL, contentType, io.LimitReader(r, int64(qLen)))
 		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
 			return err
 		}
-		log.Println(cmds)
-
-		results := make([]*eridanus.Command, len(cmds.GetCommands()))
-		for i, cmd := range cmds.GetCommands() {
-			reply, err := callApp(appURL, cmd)
-			if err != nil {
-				results[i] = &eridanus.Command{Cmd: "error", Data: []string{err.Error()}}
-				continue
-			}
-			results[i] = reply
+		defer res.Body.Close()
+		// extract the reply
+		reply, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			return err
 		}
-		out := &eridanus.Commands{Commands: results}
-		log.Println(out)
-
-		if err := Put(w, out); err != nil {
+		// send back to extension
+		rLen := uint32(len(reply))
+		if err := binary.Write(w, binary.LittleEndian, rLen); err != nil {
+			return err
+		}
+		if _, err := w.Write(reply); err != nil {
 			return err
 		}
 	}
-}
-
-func callApp(appURL string, cmd *eridanus.Command) (*eridanus.Command, error) {
-	buf := bytes.NewBuffer(nil)
-	if err := json.NewEncoder(buf).Encode(cmd); err != nil {
-		return nil, err
-	}
-
-	res, err := client.Post(appURL, contentType, buf)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-
-	var out *eridanus.Command
-	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// Get reads a message from the provided io.Reader.
-func Get(r io.Reader) (*eridanus.Commands, error) {
-	if r == nil {
-		return nil, eridanus.ErrNilReader
-	}
-	length := uint32(0)
-	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
-		return nil, err
-	}
-	payload := make([]byte, length)
-	if _, err := r.Read(payload); err != nil {
-		return nil, err
-	}
-	cmds := &eridanus.Commands{}
-	if err := json.Unmarshal(payload, cmds); err != nil {
-		return nil, err
-	}
-	return cmds, nil
-}
-
-// Put writes a message to the provided io.Writer.
-func Put(w io.Writer, cmd *eridanus.Commands) error {
-	if w == nil {
-		return eridanus.ErrNilWriter
-	}
-
-	if cmd == nil {
-		return eridanus.ErrNilCommand
-	}
-
-	out, err := json.Marshal(cmd)
-	if err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(len(out))); err != nil {
-		return err
-	}
-	if _, err := w.Write(out); err != nil {
-		return err
-	}
-	return nil
 }
 
 func setupRegistryChromeNMH(ctx context.Context, extIDs ...string) error {

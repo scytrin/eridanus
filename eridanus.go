@@ -24,8 +24,6 @@ import (
 var (
 	// ErrItemNotFound is an identifiable error for "NotFound"
 	ErrItemNotFound = errors.New("item not found")
-	// ErrNilCommand is emitted when a nil *eridanis.Command is passed to nmh.Put or nmh.Run
-	ErrNilCommand = errors.New("nil command provided")
 	// ErrNilReader is emitted when a nil io.Reader is passed to nmh.Get or nmh.Run
 	ErrNilReader = errors.New("nil reader provided")
 	// ErrNilWriter is emitted when a nil io.Writer is passed to nmh.Put or nmh.Run
@@ -38,6 +36,86 @@ var (
 		URLClass_LIST: {ParseResultType_FOLLOW, ParseResultType_NEXT},
 	}
 )
+
+// StorageBackend powers Storage.
+type StorageBackend interface {
+	GetRootPath() string
+	RegisterOnClose(func() error)
+	Close() error
+
+	Keys(prefix string) ([]string, error)
+	Set(key string, r io.Reader) error
+	Has(key string) bool
+	Get(key string) (io.ReadCloser, error)
+
+	Delete(key string) error
+	Import(srcPath, key string, move bool) error
+}
+
+// ClassesStorage stores classes.
+type ClassesStorage interface {
+	Names() ([]string, error)
+	Put(*URLClass) error
+	Has(string) bool
+	Get(string) (*URLClass, error)
+	For(*url.URL) (*URLClass, error)
+}
+
+// ParsersStorage stores parsers.
+type ParsersStorage interface {
+	Names() ([]string, error)
+	Put(*Parser) error
+	Has(string) bool
+	Get(string) (*Parser, error)
+	For(*URLClass) ([]*Parser, error)
+}
+
+// TagStorage stores tags.
+type TagStorage interface {
+	Hashes() (IDHashes, error)
+	Put(IDHash, Tags) error
+	Has(IDHash) bool
+	Get(IDHash) (Tags, error)
+
+	Find() (IDHashes, error)
+}
+
+// ContentStorage stores content.
+type ContentStorage interface {
+	Hashes() (IDHashes, error)
+	Put(io.Reader) (IDHash, error)
+	Has(IDHash) bool
+	Get(IDHash) (io.ReadCloser, error)
+
+	Thumbnail(IDHash) (io.ReadCloser, error)
+}
+
+// FetcherStorage stores web cache related data.
+type FetcherStorage interface {
+	http.CookieJar
+	GetResults(*url.URL) (*ParseResults, error)
+	SetResults(*url.URL, *ParseResults) error
+	GetCached(*url.URL) (*http.Response, error)
+	SetCached(*url.URL, *http.Response) error
+}
+
+// Storage manages data.
+type Storage interface {
+	Backend() StorageBackend
+	ClassesStorage() ClassesStorage
+	ParsersStorage() ParsersStorage
+	TagStorage() TagStorage
+	ContentStorage() ContentStorage
+	FetcherStorage() FetcherStorage
+}
+
+// Fetcher acquires content.
+type Fetcher interface {
+	Close() error
+	Get(context.Context, string) (*ParseResults, error)
+	GetURL(context.Context, *url.URL) (*ParseResults, error)
+	Results(string) (*ParseResults, error)
+}
 
 // IDHash is a key for identifying an item.
 type IDHash string
@@ -122,86 +200,6 @@ func (ts Tags) ToSlice() []string {
 // String returns a string composed of tags separated by commas.
 func (ts Tags) String() string {
 	return strings.Join(ts.ToSlice(), ",")
-}
-
-// StorageBackend powers Storage.
-type StorageBackend interface {
-	GetRootPath() string
-	RegisterOnClose(func() error)
-	Close() error
-
-	Keys(prefix string) ([]string, error)
-	Set(key string, r io.Reader) error
-	Has(key string) bool
-	Get(key string) (io.ReadCloser, error)
-
-	Delete(key string) error
-	Import(srcPath, key string, move bool) error
-}
-
-// ClassesStorage stores classes.
-type ClassesStorage interface {
-	Names() ([]string, error)
-	Put(*URLClass) error
-	Has(string) bool
-	Get(string) (*URLClass, error)
-	For(*url.URL) (*URLClass, error)
-}
-
-// ParsersStorage stores parsers.
-type ParsersStorage interface {
-	Names() ([]string, error)
-	Put(*Parser) error
-	Has(string) bool
-	Get(string) (*Parser, error)
-	For(*URLClass) ([]*Parser, error)
-}
-
-// TagStorage stores tags.
-type TagStorage interface {
-	Hashes() (IDHashes, error)
-	Put(IDHash, Tags) error
-	Has(IDHash) bool
-	Get(IDHash) (Tags, error)
-
-	Find() (IDHashes, error)
-}
-
-// ContentStorage stores content.
-type ContentStorage interface {
-	Hashes() (IDHashes, error)
-	Put(io.Reader) (IDHash, error)
-	Has(IDHash) bool
-	Get(IDHash) (io.ReadCloser, error)
-
-	Thumbnail(IDHash) (io.ReadCloser, error)
-}
-
-// FetcherStorage stores web cache related data.
-type FetcherStorage interface {
-	http.CookieJar
-	GetResults(*url.URL) (*ParseResults, error)
-	SetResults(*url.URL, *ParseResults) error
-	GetCached(*url.URL) (*http.Response, error)
-	SetCached(*url.URL, *http.Response) error
-}
-
-// Storage manages data.
-type Storage interface {
-	Backend() StorageBackend
-	ClassesStorage() ClassesStorage
-	ParsersStorage() ParsersStorage
-	TagStorage() TagStorage
-	ContentStorage() ContentStorage
-	FetcherStorage() FetcherStorage
-}
-
-// Fetcher acquires content.
-type Fetcher interface {
-	Close() error
-	Get(context.Context, string) (*ParseResults, error)
-	GetURL(context.Context, *url.URL) (*ParseResults, error)
-	Results(string) (*ParseResults, error)
 }
 
 // RecoveryHandler allows for handling panics.

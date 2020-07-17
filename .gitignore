@@ -16,3 +16,4 @@
 # vendor/
 .vscode
 *.pb.go
+debug.log
